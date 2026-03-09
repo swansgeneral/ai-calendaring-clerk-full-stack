@@ -1,0 +1,42 @@
+{
+  "name": "ai-calendaring-clerk",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "NODE_ENV=development tsx server.ts",
+    "build": "vite build",
+    "lint": "tsc --noEmit",
+    "start": "tsx server.ts",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@google/genai": "^1.33.0",
+    "@tailwindcss/vite": "^4.2.1",
+    "@vitejs/plugin-react": "^5.0.0",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "firebase-admin": "^13.7.0",
+    "framer-motion": "^12.34.3",
+    "jsonrepair": "^3.13.2",
+    "lucide-react": "^0.561.0",
+    "luxon": "^3.7.2",
+    "pdfjs-dist": "3.11.174",
+    "react": "^19.2.3",
+    "react-dom": "^19.2.3",
+    "tailwindcss": "^4.2.1",
+    "tsx": "^4.21.0",
+    "ws": "^8.19.0"
+  },
+  "devDependencies": {
+    "@types/cookie-parser": "^1.4.10",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/luxon": "^3.7.1",
+    "@types/node": "^22.14.0",
+    "@types/ws": "^8.18.1",
+    "typescript": "~5.8.2",
+    "vite": "^6.2.0"
+  }
+}

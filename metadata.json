@@ -1,0 +1,5 @@
+{
+  "name": "AI Calendaring Clerk - V2",
+  "description": "An intelligent legal docketing assistant that extracts, verifies, and synchronizes court dates and deadlines from legal documents with Clio Manage.",
+  "requestFramePermissions": []
+}
