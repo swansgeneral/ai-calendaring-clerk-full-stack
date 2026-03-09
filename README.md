@@ -1,6 +1,6 @@
 # AI Calendaring Clerk V2
 
-An advanced, full-stack legal docketing assistant designed for law firms to analyze legal documents (PDFs), extract precise schedules, apply firm-specific SOPs (Standard Operating Procedures), and synchronize everything with Clio Manage.
+A full-stack legal docketing assistant designed for law firms to analyze legal documents (PDFs), extract all referenced dates, apply firm-specific SOPs (Standard Operating Procedures), and synchronize everything with Clio Manage.
 
 ## 🚀 Overview
 
