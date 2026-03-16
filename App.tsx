@@ -452,7 +452,7 @@ const App: React.FC = () => {
                   <img 
                     src="https://swans.co/wp-content/uploads/2024/10/W-LOGO.svg" 
                     alt="Swans Logo" 
-                    className={`${analysisState.status === 'success' ? 'h-8' : 'h-10'} w-auto object-contain transition-all`} 
+                    className={`${analysisState.status === 'success' ? 'h-[27px]' : 'h-[34px]'} w-auto object-contain transition-all`} 
                   />
                </div>
 

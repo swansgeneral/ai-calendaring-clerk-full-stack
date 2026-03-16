@@ -4,7 +4,7 @@ import { SOPEvent, SOPReminder } from '../types';
 import { 
   Plus, Trash2, ChevronRight, ChevronDown, Clock, Bell, 
   Edit3, Mail, Calendar as CalendarIcon,
-  UserCheck, ShieldCheck, X, Search, Filter, Info, CheckCircle2
+  UserCheck, ShieldCheck, X, Search, Filter, Info, CheckCircle2, Database
 } from 'lucide-react';
 
 const InfoTip: React.FC<{ text: string }> = ({ text }) => (
@@ -202,6 +202,101 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
     if (editingReminderId === reminderId) setEditingReminderId(null);
   };
 
+  const seedSampleData = () => {
+    const trialId = `rec_trial_${Math.random().toString(36).substr(2, 5)}`;
+    const depoId = `rec_depo_${Math.random().toString(36).substr(2, 5)}`;
+    const mediationId = `rec_med_${Math.random().toString(36).substr(2, 5)}`;
+
+    const sampleEvents: SOPEvent[] = [
+      {
+        id: trialId,
+        RecordID: trialId,
+        "Event Name": "Jury Trial",
+        "Case Type": "Personal Injury",
+        "Title in Calendar Event": "Jury Trial: {Case Name}",
+        "Description in Calendar Event": "Trial commencement. Ensure all exhibits are ready. {prompt}",
+        "Invite All Attorneys": true,
+        "Invite All Staff Members": true,
+        "Default Duration (Hours)": 8,
+        "Reminders": [`rem_trial_1_${trialId}`, `rem_trial_2_${trialId}`]
+      },
+      {
+        id: depoId,
+        RecordID: depoId,
+        "Event Name": "Deposition",
+        "Case Type": "Personal Injury",
+        "Title in Calendar Event": "Deposition: {Deponent Name}",
+        "Description in Calendar Event": "Deposition of {Deponent Name}. Location: {Location}. {prompt}",
+        "Invite All Attorneys": true,
+        "Invite All Staff Members": false,
+        "Default Duration (Hours)": 4,
+        "Reminders": [`rem_depo_1_${depoId}`]
+      },
+      {
+        id: mediationId,
+        RecordID: mediationId,
+        "Event Name": "Mediation",
+        "Case Type": "Civil",
+        "Title in Calendar Event": "Mediation: {Case Name}",
+        "Description in Calendar Event": "Mediation session. Review settlement authority. {prompt}",
+        "Invite All Attorneys": true,
+        "Invite All Staff Members": true,
+        "Default Duration (Hours)": 6,
+        "Reminders": [`rem_med_1_${mediationId}`]
+      }
+    ];
+
+    const sampleReminders: SOPReminder[] = [
+      {
+        id: `rem_trial_1_${trialId}`,
+        "Reminder ID": `rem_trial_1_${trialId}`,
+        "Unit": "weeks",
+        "Quantity": 1,
+        "Type of Reminder": "Email",
+        "Remind All Attorneys": true,
+        "Remind All Staff Members": true,
+        "Calendar Event": [trialId]
+      },
+      {
+        id: `rem_trial_2_${trialId}`,
+        "Reminder ID": `rem_trial_2_${trialId}`,
+        "Unit": "days",
+        "Quantity": 1,
+        "Type of Reminder": "Email",
+        "Remind All Attorneys": true,
+        "Remind All Staff Members": true,
+        "Calendar Event": [trialId]
+      },
+      {
+        id: `rem_depo_1_${depoId}`,
+        "Reminder ID": `rem_depo_1_${depoId}`,
+        "Unit": "days",
+        "Quantity": 2,
+        "Type of Reminder": "Email",
+        "Remind All Attorneys": true,
+        "Remind All Staff Members": false,
+        "Calendar Event": [depoId]
+      },
+      {
+        id: `rem_med_1_${mediationId}`,
+        "Reminder ID": `rem_med_1_${mediationId}`,
+        "Unit": "days",
+        "Quantity": 3,
+        "Type of Reminder": "Email",
+        "Remind All Attorneys": true,
+        "Remind All Staff Members": true,
+        "Calendar Event": [mediationId]
+      }
+    ];
+
+    if (onUpdateAll) {
+      onUpdateAll(sampleEvents, sampleReminders);
+    } else {
+      onUpdateEvents(sampleEvents);
+      onUpdateReminders(sampleReminders);
+    }
+  };
+
   const filteredEvents = sopEvents
     .filter(event => {
       const matchesSearch = (event["Event Name"] || '').toLowerCase().includes(searchTerm.toLowerCase());
@@ -297,7 +392,39 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
           </div>
 
           <div className="grid gap-4">
-            {filteredEvents.map((event) => (
+            {sopEvents.length === 0 ? (
+              <div className="bg-white border-2 border-dashed border-slate-200 rounded-2xl p-12 text-center space-y-6">
+                <div className="w-16 h-16 bg-slate-50 rounded-full flex items-center justify-center mx-auto">
+                  <Database className="w-8 h-8 text-slate-300" />
+                </div>
+                <div className="max-w-md mx-auto space-y-2">
+                  <h3 className="text-lg font-bold text-slate-900">Your SOP Database is Empty</h3>
+                  <p className="text-sm text-slate-500 leading-relaxed">
+                    The AI Clerk uses this database to match extracted events and automatically add reminders. 
+                    Add your first event type manually or start with our sample legal templates.
+                  </p>
+                </div>
+                <div className="flex items-center justify-center gap-4">
+                  <button
+                    onClick={addEvent}
+                    className="px-6 py-2.5 bg-[#020035] text-white rounded-lg font-bold text-sm shadow-sm hover:shadow-md transition-all cursor-pointer"
+                  >
+                    Add Manually
+                  </button>
+                  <button
+                    onClick={seedSampleData}
+                    className="px-6 py-2.5 bg-white border border-slate-200 text-slate-700 rounded-lg font-bold text-sm hover:bg-slate-50 transition-all cursor-pointer"
+                  >
+                    Seed Sample Data
+                  </button>
+                </div>
+              </div>
+            ) : filteredEvents.length === 0 ? (
+              <div className="bg-white border border-slate-200 rounded-xl p-12 text-center">
+                <Search className="w-8 h-8 text-slate-300 mx-auto mb-3" />
+                <p className="text-slate-500 font-medium">No event types match your current filters.</p>
+              </div>
+            ) : filteredEvents.map((event) => (
               <div key={event.id} className="bg-white border border-slate-200 rounded-xl shadow-sm overflow-hidden transition-all hover:border-slate-300">
                 {/* Event Header */}
                 <div 
