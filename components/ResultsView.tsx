@@ -29,10 +29,9 @@ interface ExportModalProps {
   errorMessage?: string;
   selectedEvents: Event[];
   summary?: { entriesCreated: number; remindersSent: number };
-  exportMethod?: 'webhook' | 'direct';
 }
 
-const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, onSubmit, status, errorMessage, selectedEvents, summary, exportMethod }) => {
+const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, onSubmit, status, errorMessage, selectedEvents, summary }) => {
   const [matterDisplayNumber, setMatterDisplayNumber] = useState('');
   const [progress, setProgress] = useState(0);
 
@@ -457,7 +456,6 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
   const [showAllHighlights, setShowAllHighlights] = useState(true);
   const [events, setEvents] = useState<Event[]>(initialEvents);
   const [isExportModalOpen, setIsExportModalOpen] = useState(false);
-  const [exportMethod, setExportMethod] = useState<'webhook' | 'direct'>('webhook');
   const [submissionStatus, setSubmissionStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>('idle');
   const [submissionError, setSubmissionError] = useState<string | undefined>(undefined);
   const [exportSummary, setExportSummary] = useState<{ entriesCreated: number; remindersSent: number } | undefined>(undefined);
@@ -632,14 +630,13 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
     return { valid: true };
   };
 
-  const handleInitiateExport = (method: 'webhook' | 'direct' = 'webhook') => {
+  const handleInitiateExport = () => {
     const { valid, message } = validateExport();
     if (!valid) {
       setValidationError(message || "Please check all required fields.");
       return;
     }
     setValidationError(null);
-    setExportMethod(method);
     setIsExportModalOpen(true);
   };
 
@@ -711,7 +708,7 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
         events: eventsWithMetadata
       };
 
-      const endpoint = exportMethod === 'direct' ? '/api/clio/export-direct' : '/api/clio/post-events';
+      const endpoint = '/api/clio/export-direct';
       const response = await fetch(endpoint, {
         method: 'POST',
         headers: {
@@ -902,7 +899,6 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
             errorMessage={submissionError} 
             selectedEvents={events.filter(e => e.selected)} 
             summary={exportSummary}
-            exportMethod={exportMethod}
           />
         )}
       </AnimatePresence>
@@ -935,7 +931,7 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
         <div className="px-6 py-5 border-b border-gray-100 bg-white flex-shrink-0 relative">
           <div className="flex gap-2 mb-4 pr-4">
             <button onClick={handleProcessNew} className="w-[20%] bg-gray-500 hover:bg-gray-600 text-white flex items-center justify-center rounded-lg transition-colors py-2.5 shadow-sm active:scale-95 text-[11px] font-bold cursor-pointer" title="Process New Document"><ArrowLeft className="w-3.5 h-3.5 mr-1" /> Back</button>
-            <button onClick={() => handleInitiateExport('direct')} className="flex-1 bg-[#00076F] hover:bg-[#00076F]/90 text-white font-bold py-2.5 rounded-lg shadow-md flex items-center justify-center transition-transform active:scale-95 text-[11px] cursor-pointer"><UploadCloud className="w-3.5 h-3.5 mr-1.5 text-blue-200" /> Export to Clio</button>
+            <button onClick={() => handleInitiateExport()} className="flex-1 bg-[#00076F] hover:bg-[#00076F]/90 text-white font-bold py-2.5 rounded-lg shadow-md flex items-center justify-center transition-transform active:scale-95 text-[11px] cursor-pointer"><UploadCloud className="w-3.5 h-3.5 mr-1.5 text-blue-200" /> Export to Clio</button>
           </div>
 
           <div className="flex flex-col gap-3">

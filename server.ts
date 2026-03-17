@@ -569,38 +569,6 @@ async function startServer() {
     res.json({ success: true });
   });
 
-  app.post("/api/clio/post-events", async (req, res) => {
-    const webhookUrl = process.env.WEBHOOK_POST_EVENTS_URL;
-    const webhookApiKey = process.env.WEBHOOK_API_KEY;
-
-    if (!webhookUrl) {
-      return res.status(500).json({ error: "WEBHOOK_POST_EVENTS_URL not configured on server" });
-    }
-
-    try {
-      const response = await fetch(webhookUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'x-make-apikey': webhookApiKey || '',
-          'X-API-Key': webhookApiKey || ''
-        },
-        body: JSON.stringify(req.body)
-      });
-
-      if (!response.ok) {
-        const errorText = await response.text();
-        return res.status(response.status).send(errorText || response.statusText);
-      }
-
-      const data = await response.json().catch(() => ({ success: true }));
-      res.json(data);
-    } catch (error: any) {
-      console.error("Webhook Proxy Error:", error);
-      res.status(500).json({ error: error.message });
-    }
-  });
-
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
   app.post("/api/clio/export-direct", async (req, res) => {
