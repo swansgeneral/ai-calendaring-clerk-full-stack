@@ -16,9 +16,9 @@ RUN npm run build
 
 # Tell the app it is in PRODUCTION mode
 ENV NODE_ENV=production
+
 # Tell the app to use port 8080 (Cloud Run's favorite)
 ENV PORT=8080
-
 EXPOSE 8080
 
 # Start the server

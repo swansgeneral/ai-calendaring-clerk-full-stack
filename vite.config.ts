@@ -14,8 +14,6 @@ export default defineConfig(({ mode }) => {
         port: 3000,
         host: '0.0.0.0',
         hmr: false,
-        // This line fixes the "Blocked request" error
-        allowedHosts: ["ai-calendaring-clerk-full-stack-405499094876.us-south1.run.app"],
       },
       plugins: [react(), tailwindcss()],
       define: {
