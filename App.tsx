@@ -130,6 +130,8 @@ const App: React.FC = () => {
     // 2. WebSocket for real-time SOP updates
     let ws: WebSocket | null = null;
     let reconnectTimeout: NodeJS.Timeout;
+    let retryCount = 0;
+    const MAX_RETRIES = 10;
 
     const connectWS = () => {
       try {
@@ -138,6 +140,7 @@ const App: React.FC = () => {
         ws = new WebSocket(wsUrl);
 
         ws.onopen = () => {
+          retryCount = 0;
         };
 
         ws.onmessage = (event) => {
@@ -153,7 +156,9 @@ const App: React.FC = () => {
                 }));
               }
             }
-          } catch (e) {}
+          } catch (e) {
+            console.warn("Failed to parse WebSocket message:", e);
+          }
         };
 
         ws.onerror = () => {
@@ -161,10 +166,17 @@ const App: React.FC = () => {
         };
 
         ws.onclose = () => {
-          reconnectTimeout = setTimeout(connectWS, 5000);
+          if (retryCount < MAX_RETRIES) {
+            const delay = Math.min(1000 * 2 ** retryCount, 30000);
+            retryCount++;
+            reconnectTimeout = setTimeout(connectWS, delay);
+          }
         };
       } catch (err) {
-        reconnectTimeout = setTimeout(connectWS, 5000);
+        if (retryCount < MAX_RETRIES) {
+          retryCount++;
+          reconnectTimeout = setTimeout(connectWS, 5000);
+        }
       }
     };
 

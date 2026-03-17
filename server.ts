@@ -410,7 +410,7 @@ async function startServer() {
                 // 1. Try postMessage to opener (primary)
                 if (window.opener) {
                   try {
-                    window.opener.postMessage(message, '*');
+                    window.opener.postMessage(message, window.location.origin);
                   } catch (e) {
                     console.error("Failed to postMessage to opener:", e);
                   }
@@ -673,6 +673,15 @@ async function startServer() {
             endAt = DateTime.fromISO(`${event.end_date}T${endTimeStr}`, { zone: timezone || "UTC" }).toISO() || "";
           }
 
+          const calendarOwnerId = Number(event["Calendar Owner"]);
+          const matterId = Number(matter.id);
+
+          if (isNaN(calendarOwnerId) || isNaN(matterId)) {
+            console.error(`Invalid IDs — calendarOwner: ${event["Calendar Owner"]}, matter: ${matter.id}`);
+            errors.push(`Failed to create event "${event.title}": Invalid calendar owner or matter ID`);
+            continue;
+          }
+
           const calendarEntryPayload = {
             data: {
               summary: eventTitle,
@@ -681,8 +690,8 @@ async function startServer() {
               start_at: startAt,
               end_at: endAt,
               all_day: event.is_all_day,
-              calendar_owner: { id: Number(event["Calendar Owner"]) },
-              matter: { id: Number(matter.id) },
+              calendar_owner: { id: calendarOwnerId },
+              matter: { id: matterId },
               attendees: attendees,
               send_email_notification: false
             }
