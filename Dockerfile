@@ -1,25 +1,23 @@
-# Use Node.js 20
+# Use Node.js 20 as the base image
 FROM node:20-slim
 
 # Set the working directory
 WORKDIR /app
 
-# Copy files and install EVERYTHING (including devDependencies like Vite)
+# Copy package.json and package-lock.json
 COPY package*.json ./
+
+# Install dependencies
 RUN npm install
 
-# Copy the rest of the code
+# Copy the rest of the application code
 COPY . .
 
-# IMPORTANT: Build the frontend (creates the /dist folder)
+# Build the frontend
 RUN npm run build
 
-# Tell the app it is in PRODUCTION mode
-ENV NODE_ENV=production
-# Tell the app to use port 8080 (Cloud Run's favorite)
-ENV PORT=8080
+# Expose the port the app runs on
+EXPOSE 3000
 
-EXPOSE 8080
-
-# Start the server
+# Start the application
 CMD ["npm", "start"]

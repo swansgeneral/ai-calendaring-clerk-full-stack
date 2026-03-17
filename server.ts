@@ -6,6 +6,10 @@ import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
 import admin from "firebase-admin";
 import { DateTime } from "luxon";
+import { GoogleGenAI, Type } from "@google/genai";
+import { jsonrepair } from "jsonrepair";
+import { systemPrompt, responseSchema, getEventMatchingPrompt, eventMatchingResponseSchema } from "./prompts/systemPrompt";
+import { ENV_VARS } from "./env";
 
 const PORT = Number(process.env.PORT) || 3000;
 console.log(`Initializing server on port ${PORT}...`);
@@ -88,6 +92,179 @@ async function startServer() {
   // API Routes
   app.get("/api/health", (req, res) => {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
+  });
+
+  // Gemini Analysis Proxy
+  app.post("/api/gemini/analyze", async (req, res) => {
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "Gemini API Key is missing on server." });
+    }
+
+    try {
+      const { filePart } = req.body;
+      if (!filePart) {
+        return res.status(400).json({ error: "Missing file data for analysis." });
+      }
+
+      const ai = new GoogleGenAI({ apiKey });
+      const model = ENV_VARS.GEMINI_MODEL;
+
+      const config: any = {
+        systemInstruction: systemPrompt,
+        responseMimeType: "application/json",
+        responseSchema: responseSchema,
+        temperature: ENV_VARS.GEMINI_TEMPERATURE,
+        maxOutputTokens: 32768,
+      };
+
+      if ((ENV_VARS as any).GEMINI_THINKING_LEVEL) {
+        config.thinkingConfig = { thinkingLevel: (ENV_VARS as any).GEMINI_THINKING_LEVEL };
+      }
+
+      const result = await ai.models.generateContent({
+        model,
+        contents: { parts: [filePart] },
+        config,
+      });
+
+      let text = result.text || "";
+      text = text.trim();
+      if (text.startsWith("```json")) {
+        text = text.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+      } else if (text.startsWith("```")) {
+        text = text.replace(/^```\s*/, "").replace(/\s*```$/, "");
+      }
+
+      const repairedText = jsonrepair(text);
+      const resultData = JSON.parse(repairedText);
+      
+      res.json(resultData);
+    } catch (error: any) {
+      console.error("Gemini Analysis Error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/gemini/apply-reminders", async (req, res) => {
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "Gemini API Key is missing on server." });
+    }
+
+    try {
+      const { extractedForAI, sopListForAI } = req.body;
+      
+      const ai = new GoogleGenAI({ apiKey });
+      const model = ENV_VARS.GEMINI_MODEL;
+
+      const prompt = getEventMatchingPrompt(sopListForAI);
+      const userContent = `Here are the extracted events to classify: ${JSON.stringify(extractedForAI)}`;
+
+      const config: any = {
+        systemInstruction: prompt,
+        responseMimeType: "application/json",
+        responseSchema: eventMatchingResponseSchema,
+        temperature: ENV_VARS.GEMINI_TEMPERATURE, 
+        maxOutputTokens: 4096,
+      };
+
+      if ((ENV_VARS as any).GEMINI_THINKING_LEVEL) {
+        config.thinkingConfig = { thinkingLevel: (ENV_VARS as any).GEMINI_THINKING_LEVEL };
+      }
+
+      const response = await ai.models.generateContent({
+        model,
+        contents: userContent,
+        config,
+      });
+
+      let text = response.text || "";
+      text = text.trim();
+      if (text.startsWith("```json")) {
+        text = text.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+      } else if (text.startsWith("```")) {
+        text = text.replace(/^```\s*/, "").replace(/\s*```$/, "");
+      }
+
+      const repairedText = jsonrepair(text);
+      const resultData = JSON.parse(repairedText);
+      
+      res.json(resultData);
+    } catch (error: any) {
+      console.error("Gemini Reminders Error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  });
+
+  app.post("/api/gemini/process-dynamic-descriptions", async (req, res) => {
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) {
+      return res.status(500).json({ error: "Gemini API Key is missing on server." });
+    }
+
+    try {
+      const { filePart, queue } = req.body;
+      
+      const ai = new GoogleGenAI({ apiKey });
+      const model = ENV_VARS.GEMINI_MODEL;
+
+      const systemInstruction = "You are a Legal Assistant. Read the document. For each Event ID and Template provided, fill in the placeholders indicated by {prompt} with specific details found in the document. Return the full description with the placeholders replaced by the extracted information. If information for a placeholder is not found, replace it with 'Information not found'. Keep the text outside the curly braces exactly as it is in the template.";
+      
+      const responseSchema = {
+        type: Type.OBJECT,
+        properties: {
+          results: {
+            type: Type.ARRAY,
+            items: {
+              type: Type.OBJECT,
+              properties: {
+                eventId: { type: Type.STRING },
+                description: { type: Type.STRING }
+              },
+              required: ["eventId", "description"]
+            }
+          }
+        },
+        required: ["results"]
+      };
+
+      const userPrompt = `Templates for events:\n${JSON.stringify(queue)}`;
+
+      const config: any = {
+        systemInstruction,
+        responseMimeType: "application/json",
+        responseSchema,
+        temperature: 0.1, 
+        maxOutputTokens: 4096,
+      };
+
+      if ((ENV_VARS as any).GEMINI_THINKING_LEVEL) {
+        config.thinkingConfig = { thinkingLevel: (ENV_VARS as any).GEMINI_THINKING_LEVEL };
+      }
+
+      const response = await ai.models.generateContent({
+        model,
+        contents: { parts: [filePart, { text: userPrompt }] },
+        config,
+      });
+
+      let text = response.text || "";
+      text = text.trim();
+      if (text.startsWith("```json")) {
+        text = text.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+      } else if (text.startsWith("```")) {
+        text = text.replace(/^```\s*/, "").replace(/\s*```$/, "");
+      }
+
+      const repairedText = jsonrepair(text);
+      const resultData = JSON.parse(repairedText);
+      
+      res.json(resultData.results);
+    } catch (error: any) {
+      console.error("Gemini Dynamic Descriptions Error:", error);
+      res.status(500).json({ error: error.message });
+    }
   });
 
   app.get("/api/sop-data", async (req, res) => {

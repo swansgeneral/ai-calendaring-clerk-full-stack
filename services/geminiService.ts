@@ -1,9 +1,6 @@
 
-import { GoogleGenAI, Type } from "@google/genai";
-import { jsonrepair } from "jsonrepair";
 import * as pdfjsLib from 'pdfjs-dist';
 import { Event, Reminder, SOPEvent, SOPReminder } from "../types";
-import { systemPrompt, responseSchema, getEventMatchingPrompt, eventMatchingResponseSchema } from "../prompts/systemPrompt";
 import { ENV_VARS, CaseType } from "../env";
 
 // Setup PDF.js worker
@@ -95,49 +92,28 @@ export const analyzeDocument = async (
   file: File, 
   onProgress?: (progress: { current: number, total: number, phase: string }) => void
 ): Promise<{ events: Event[], caseType: CaseType }> => {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey) throw new Error("API Key is missing.");
-
   if (onProgress) onProgress({ current: 0, total: 0, phase: 'reading' });
 
-  const model = ENV_VARS.GEMINI_MODEL;
-  const ai = new GoogleGenAI({ apiKey });
   const filePart = await fileToGenerativePart(file);
 
   if (onProgress) onProgress({ current: 0, total: 1, phase: 'analyzing' });
-
-  const config: any = {
-    systemInstruction: systemPrompt,
-    responseMimeType: "application/json",
-    responseSchema: responseSchema,
-    temperature: ENV_VARS.GEMINI_TEMPERATURE,
-    maxOutputTokens: 32768,
-  };
-
-  if ((ENV_VARS as any).GEMINI_THINKING_LEVEL) {
-    config.thinkingConfig = { thinkingLevel: (ENV_VARS as any).GEMINI_THINKING_LEVEL };
-  }
 
   let combinedEvents: any[] = [];
   let detectedCaseType: CaseType = ENV_VARS.DEFAULT_CASE_TYPE as CaseType;
 
   try {
-    const response = await ai.models.generateContent({
-      model,
-      contents: { parts: [filePart] },
-      config,
+    const response = await fetch("/api/gemini/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filePart })
     });
 
-    let text = response.text || "";
-    text = text.trim();
-    if (text.startsWith("```json")) {
-      text = text.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-    } else if (text.startsWith("```")) {
-      text = text.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      throw new Error(errData.error || `Server error: ${response.statusText}`);
     }
 
-    const repairedText = jsonrepair(text);
-    const resultData = JSON.parse(repairedText) as { case_type: string, events: any[] };
+    const resultData = await response.json() as { case_type: string, events: any[] };
     
     if (resultData.case_type) {
       detectedCaseType = resultData.case_type as CaseType;
@@ -242,9 +218,6 @@ export const applyAutoReminders = async (
   sopReminders: SOPReminder[],
   file?: File
 ): Promise<{ events: Event[], matchedCount: number, remindersAddedCount: number }> => {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey) throw new Error("API Key is missing.");
-
   // Filter SOP events by Case Type first
   const relevantSopEvents = sopEvents.filter(s => s["Case Type"] === caseType);
 
@@ -252,9 +225,6 @@ export const applyAutoReminders = async (
   if (!relevantSopEvents.length || !sopReminders.length) {
     return { events, matchedCount: 0, remindersAddedCount: 0 };
   }
-
-  const ai = new GoogleGenAI({ apiKey });
-  const model = ENV_VARS.GEMINI_MODEL;
 
   // 1. Prepare Data for Matching
   // Minify extracted events for token efficiency
@@ -273,50 +243,25 @@ export const applyAutoReminders = async (
     "Calendar Description": s["Description in Calendar Event"] ?? "N/A"
   })));
 
-  // 2. Call AI to Match Extracted Events -> SOP Record IDs
-  const prompt = getEventMatchingPrompt(sopListForAI);
-  const userContent = `Here are the extracted events to classify: ${JSON.stringify(extractedForAI)}`;
-
-  const config: any = {
-    systemInstruction: prompt,
-    responseMimeType: "application/json",
-    responseSchema: eventMatchingResponseSchema,
-    temperature: ENV_VARS.GEMINI_TEMPERATURE, 
-    maxOutputTokens: 4096,
-  };
-
-  if ((ENV_VARS as any).GEMINI_THINKING_LEVEL) {
-    config.thinkingConfig = { thinkingLevel: (ENV_VARS as any).GEMINI_THINKING_LEVEL };
-  }
-
-  const response = await ai.models.generateContent({
-    model,
-    contents: userContent,
-    config,
+  // 2. Call Server to Match Extracted Events -> SOP Record IDs
+  const response = await fetch("/api/gemini/apply-reminders", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ extractedForAI, sopListForAI })
   });
 
-  let text = response.text || "";
-  text = text.trim();
-  if (text.startsWith("```json")) {
-    text = text.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-  } else if (text.startsWith("```")) {
-    text = text.replace(/^```\s*/, "").replace(/\s*```$/, "");
+  if (!response.ok) {
+    const errData = await response.json().catch(() => ({}));
+    throw new Error(errData.error || `Server error: ${response.statusText}`);
   }
 
-  let resultData;
-  try {
-    const repairedText = jsonrepair(text);
-    resultData = JSON.parse(repairedText) as { 
-      matches: { 
-        eventId: string, 
-        matchedRecordId: string | null,
-        updatedTitle?: string | null 
-      }[] 
-    };
-  } catch (e: any) {
-    console.error("Event Matching JSON Parse Error:", e);
-    throw new Error(`Failed to parse event matching response: ${e.message}`);
-  }
+  const resultData = await response.json() as { 
+    matches: { 
+      eventId: string, 
+      matchedRecordId: string | null,
+      updatedTitle?: string | null 
+    }[] 
+  };
   
   let matchedCount = 0;
   let remindersAddedCount = 0;
@@ -493,69 +438,23 @@ export const applyAutoReminders = async (
  * Secondary AI Pipeline to handle dynamic descriptions with {} placeholders
  */
 async function processDynamicDescriptions(file: File, queue: { eventId: string, template: string }[]): Promise<{ eventId: string, description: string }[]> {
-  const apiKey = process.env.API_KEY;
-  if (!apiKey) throw new Error("API Key is missing.");
-
-  const ai = new GoogleGenAI({ apiKey });
-  const model = ENV_VARS.GEMINI_MODEL;
   const filePart = await fileToGenerativePart(file);
 
-  const systemInstruction = "You are a Legal Assistant. Read the document. For each Event ID and Template provided, fill in the placeholders indicated by {prompt} with specific details found in the document. Return the full description with the placeholders replaced by the extracted information. If information for a placeholder is not found, replace it with 'Information not found'. Keep the text outside the curly braces exactly as it is in the template.";
-  
-  const responseSchema = {
-    type: Type.OBJECT,
-    properties: {
-      results: {
-        type: Type.ARRAY,
-        items: {
-          type: Type.OBJECT,
-          properties: {
-            eventId: { type: Type.STRING },
-            description: { type: Type.STRING }
-          },
-          required: ["eventId", "description"]
-        }
-      }
-    },
-    required: ["results"]
-  };
-
-  const userPrompt = `Templates for events:\n${JSON.stringify(queue)}`;
-
-  const config: any = {
-    systemInstruction,
-    responseMimeType: "application/json",
-    responseSchema,
-    temperature: 0.1, // Low temperature for factual extraction
-    maxOutputTokens: 4096,
-  };
-
-  if ((ENV_VARS as any).GEMINI_THINKING_LEVEL) {
-    config.thinkingConfig = { thinkingLevel: (ENV_VARS as any).GEMINI_THINKING_LEVEL };
-  }
-
-  const response = await ai.models.generateContent({
-    model,
-    contents: { parts: [filePart, { text: userPrompt }] },
-    config,
-  });
-
-  let text = response.text || "";
-  text = text.trim();
-  if (text.startsWith("```json")) {
-    text = text.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-  } else if (text.startsWith("```")) {
-    text = text.replace(/^```\s*/, "").replace(/\s*```$/, "");
-  }
-
-  let data;
   try {
-    const repairedText = jsonrepair(text);
-    data = JSON.parse(repairedText) as { results: { eventId: string, description: string }[] };
+    const response = await fetch("/api/gemini/process-dynamic-descriptions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ filePart, queue })
+    });
+
+    if (!response.ok) {
+      const errData = await response.json().catch(() => ({}));
+      throw new Error(errData.error || `Server error: ${response.statusText}`);
+    }
+
+    return await response.json();
   } catch (e: any) {
-    console.error("Dynamic Description JSON Parse Error:", e);
-    throw new Error(`Failed to parse dynamic description response: ${e.message}`);
+    console.error("Dynamic Description Error:", e);
+    throw e;
   }
-  
-  return data.results;
 }
