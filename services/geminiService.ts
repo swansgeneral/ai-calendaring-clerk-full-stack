@@ -197,7 +197,7 @@ export const analyzeDocument = async (
         end_time: endTime,
         verification: {
           ...e.verification,
-          boundingBox: e.verification.bounding_box
+          boundingBox: e.verification?.bounding_box
         },
         id: crypto.randomUUID(),
         selected: true,
