@@ -25,24 +25,6 @@ The AI Calendaring Clerk V2 automates the complex process of docketing by combin
 - **Database**: Firebase Firestore (for SOP rules).
 - **Integrations**: Clio Manage API (OAuth 2.0).
 
-## ⚙️ Environment Variables
-
-Create a `.env` file based on `.env.example`:
-
-```env
-# Gemini API
-API_KEY=your_gemini_api_key
-
-# Clio Manage Integration
-CLIO_CLIENT_ID=your_clio_client_id
-CLIO_CLIENT_SECRET=your_clio_client_secret
-APP_URL=your_app_url
-
-# Firebase Admin SDK (Firestore)
-# You can paste the entire JSON service account key into FIREBASE_PRIVATE_KEY
-FIREBASE_PRIVATE_KEY=your_full_service_account_json
-```
-
 ## 📋 How to Use
 
 1. **Configure SOPs**: Navigate to the **SOP Dashboard** to define how specific court events should be handled (which calendar they go to, what reminders to add).
@@ -58,7 +40,7 @@ FIREBASE_PRIVATE_KEY=your_full_service_account_json
 
 AI can make mistakes. The AI Calendaring Clerk is designed to assist docketing professionals, not replace them. Always use the built-in **Source Verification** tools to confirm the accuracy of every extracted date before finalizing the calendar.
 
-**This software is provided "as is", without warranty of any kind, express or implied, including but not limited to warranties of merchantability, fitness for a particular purpose, or non-infringement. The authors and contributors shall not be liable for any claim, damages, or other liability arising from the use of this software.**
+**This software is provided without warranty, express or implied. The authors and contributors shall not be liable for any claim, damages, or other liability arising from the use of this software.**
 
 Missed deadlines and docketing errors can have serious legal consequences. This tool does not constitute legal advice and is not a substitute for qualified legal professionals or proper docketing review procedures. Users assume full responsibility for verifying all dates and deadlines extracted by this application before acting on them.
 
@@ -177,4 +159,4 @@ A **fork** is your own copy of this codebase hosted under your GitHub account. Y
 | `CLIO_CLIENT_SECRET` | From the Clio Developer Portal (Step 6) |
 | `API_KEY` | Your Gemini API key (Step 7) |
 
-3. Click **Deploy** and wait for the new revision to go live. Your app is now fully configured and ready to use.
+3. Click **Deploy** and wait for the new revision to go live. Your app is now fully configured and ready to use. 
