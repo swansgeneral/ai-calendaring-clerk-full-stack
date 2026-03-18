@@ -2,7 +2,7 @@
 
 An advanced, full-stack legal docketing assistant designed for law firms to analyze legal documents (PDFs), extract precise schedules, apply firm-specific SOPs (Standard Operating Procedures), and synchronize everything with Clio Manage.
 
-> **Want to try this yourself?** A step-by-step deployment guide is included at the bottom of this document — no prior technical experience required.
+> **Want to try this yourself?** A step-by-step deployment guide is included at the bottom of this document — little technical experience required.
 
 ## 🚀 Overview
 
