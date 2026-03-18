@@ -19,23 +19,8 @@ console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 let db: admin.firestore.Firestore | null = null;
 try {
   if (process.env.FIREBASE_PRIVATE_KEY) {
-    let credential;
-    try {
-      // Check if the user pasted the entire JSON file into the private key field
-      const serviceAccountJson = JSON.parse(process.env.FIREBASE_PRIVATE_KEY);
-      credential = admin.credential.cert(serviceAccountJson);
-    } catch (err) {
-      // Otherwise, assume they provided the individual fields
-      if (process.env.FIREBASE_PROJECT_ID && process.env.FIREBASE_CLIENT_EMAIL) {
-        credential = admin.credential.cert({
-          projectId: process.env.FIREBASE_PROJECT_ID,
-          clientEmail: process.env.FIREBASE_CLIENT_EMAIL,
-          privateKey: process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-        });
-      } else {
-        throw new Error("Missing FIREBASE_PROJECT_ID or FIREBASE_CLIENT_EMAIL for individual field setup.");
-      }
-    }
+    const serviceAccountJson = JSON.parse(process.env.FIREBASE_PRIVATE_KEY);
+    const credential = admin.credential.cert(serviceAccountJson);
     
     admin.initializeApp({ credential });
     db = admin.firestore();

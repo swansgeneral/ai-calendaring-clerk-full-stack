@@ -8,7 +8,7 @@ import { ThinkingLevel } from "@google/genai";
  * all configuration variables are defined here.
  */
 
-export const CASE_TYPES = ["Civil", "Personal Injury"] as const;
+export const CASE_TYPES = ["Other", "Personal Injury"] as const;
 export type CaseType = typeof CASE_TYPES[number];
 
 export const ENV_VARS = {

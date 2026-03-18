@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { SOPEvent, SOPReminder } from '../types';
+import { CASE_TYPES, ENV_VARS } from '../env';
 import { 
   Plus, Trash2, ChevronRight, ChevronDown, Clock, Bell, 
   Edit3, Mail, Calendar as CalendarIcon,
@@ -45,7 +46,7 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
   const [validationError, setValidationError] = useState<string | null>(null);
   const [newEvent, setNewEvent] = useState<Partial<SOPEvent>>({
     "Event Name": "",
-    "Case Type": "Personal Injury",
+    "Case Type": ENV_VARS.DEFAULT_CASE_TYPE,
     "Title in Calendar Event": "",
     "Description in Calendar Event": "",
     "Invite All Attorneys": true,
@@ -102,7 +103,7 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
       id: newId,
       RecordID: newId,
       "Event Name": newEvent["Event Name"] || "New Event Type",
-      "Case Type": newEvent["Case Type"] || "Personal Injury",
+      "Case Type": newEvent["Case Type"] || ENV_VARS.DEFAULT_CASE_TYPE,
       "Title in Calendar Event": newEvent["Title in Calendar Event"] || "New Event Title",
       "Description in Calendar Event": newEvent["Description in Calendar Event"] || "",
       "Invite All Attorneys": newEvent["Invite All Attorneys"] ?? true,
@@ -115,7 +116,7 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
     setIsAddModalOpen(false);
     setNewEvent({
       "Event Name": "",
-      "Case Type": "Personal Injury",
+      "Case Type": ENV_VARS.DEFAULT_CASE_TYPE,
       "Title in Calendar Event": "",
       "Description in Calendar Event": "",
       "Invite All Attorneys": true,
@@ -212,7 +213,7 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
         id: trialId,
         RecordID: trialId,
         "Event Name": "Jury Trial",
-        "Case Type": "Personal Injury",
+        "Case Type": ENV_VARS.DEFAULT_CASE_TYPE,
         "Title in Calendar Event": "Jury Trial: {Case Name}",
         "Description in Calendar Event": "Trial commencement. Ensure all exhibits are ready. {prompt}",
         "Invite All Attorneys": true,
@@ -224,7 +225,7 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
         id: depoId,
         RecordID: depoId,
         "Event Name": "Deposition",
-        "Case Type": "Personal Injury",
+        "Case Type": ENV_VARS.DEFAULT_CASE_TYPE,
         "Title in Calendar Event": "Deposition: {Deponent Name}",
         "Description in Calendar Event": "Deposition of {Deponent Name}. Location: {Location}. {prompt}",
         "Invite All Attorneys": true,
@@ -236,7 +237,7 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
         id: mediationId,
         RecordID: mediationId,
         "Event Name": "Mediation",
-        "Case Type": "Civil",
+        "Case Type": ENV_VARS.DEFAULT_CASE_TYPE,
         "Title in Calendar Event": "Mediation: {Case Name}",
         "Description in Calendar Event": "Mediation session. Review settlement authority. {prompt}",
         "Invite All Attorneys": true,
@@ -344,8 +345,9 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
                     className="bg-slate-50 border border-slate-200 rounded-lg px-3 py-2 text-sm focus:ring-2 focus:ring-[#020035] outline-none"
                   >
                     <option value="All">All Case Types</option>
-                    <option value="Personal Injury">Personal Injury</option>
-                    <option value="Civil">Civil</option>
+                    {CASE_TYPES.map(ct => (
+                      <option key={ct} value={ct}>{ct}</option>
+                    ))}
                   </select>
                 </div>
 
@@ -452,8 +454,9 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
                             onChange={(e) => updateEvent(event.id, { "Case Type": e.target.value })}
                             className="bg-slate-50 border border-slate-200 rounded px-2 py-1 text-xs font-medium text-slate-600 focus:ring-2 focus:ring-[#020035] outline-none"
                           >
-                            <option value="Personal Injury">Personal Injury</option>
-                            <option value="Civil">Civil</option>
+                            {CASE_TYPES.map(ct => (
+                              <option key={ct} value={ct}>{ct}</option>
+                            ))}
                           </select>
                         </div>
                       ) : (
@@ -943,12 +946,13 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
                           <InfoTip text="The category of case this event belongs to. Helps narrow down relevant SOPs." />
                         </label>
                         <select
-                          value={newEvent["Case Type"] || 'Personal Injury'}
+                          value={newEvent["Case Type"] || ENV_VARS.DEFAULT_CASE_TYPE}
                           onChange={(e) => setNewEvent(prev => ({ ...prev, "Case Type": e.target.value }))}
                           className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:ring-2 focus:ring-[#020035] outline-none"
                         >
-                          <option value="Personal Injury">Personal Injury</option>
-                          <option value="Civil">Civil</option>
+                          {CASE_TYPES.map(ct => (
+                            <option key={ct} value={ct}>{ct}</option>
+                          ))}
                         </select>
                       </div>
                       <div>

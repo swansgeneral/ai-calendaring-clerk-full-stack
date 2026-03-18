@@ -169,3 +169,5 @@ A **fork** is your own copy of this codebase hosted under your GitHub account. Y
 3. Still in the same revision editor, scroll down to the **Requests** section and set **Request timeout** to `600` seconds. This is required for large exports with many events and reminders.
 
 4. Click **Deploy** and wait for the new revision to go live. Your app is now fully configured and ready to use.
+
+> **Customizing app defaults:** To change the timezone, default event duration, case types, or other application settings, edit the [`env.tsx`](env.tsx) file in your fork and redeploy.
