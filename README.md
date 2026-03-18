@@ -59,4 +59,5 @@ FIREBASE_PRIVATE_KEY=your_full_service_account_json
 AI can make mistakes. The AI Calendaring Clerk is designed to assist docketing professionals, not replace them. Always use the built-in **Source Verification** tools to confirm the accuracy of every extracted date before finalizing the calendar.
 
 ---
-*Precision docketing for the modern law firm.*
+<img width="141" height="43" alt="image" src="https://github.com/user-attachments/assets/7b02e17a-6d47-4907-97f0-d93e90a77dff" />
+
