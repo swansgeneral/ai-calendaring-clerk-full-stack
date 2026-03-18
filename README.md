@@ -2,6 +2,8 @@
 
 An advanced, full-stack legal docketing assistant designed for law firms to analyze legal documents (PDFs), extract precise schedules, apply firm-specific SOPs (Standard Operating Procedures), and synchronize everything with Clio Manage.
 
+> **Want to try this yourself?** A step-by-step deployment guide is included at the bottom of this document — no prior technical experience required.
+
 ## 🚀 Overview
 
 The AI Calendaring Clerk V2 automates the complex process of docketing by combining Google's Gemini AI with deep integrations into legal practice management software. It doesn't just extract dates; it understands the context, applies your firm's specific rules (reminders, calendar mappings), and syncs them directly to your system of record.
@@ -14,7 +16,6 @@ The AI Calendaring Clerk V2 automates the complex process of docketing by combin
 - **SOP Rules Engine**: Configure firm-wide rules in a dedicated dashboard. Map extracted events to specific Clio calendars and set automatic reminders (Email or Calendar).
 - **Dynamic Descriptions**: AI-powered description enrichment that fills placeholders (e.g., `[Matter Name]`) with actual data from the document.
 - **Source Verification**: Provides 1:1 verbatim quotes and page numbers for every extracted date, with integrated visual highlighting in the built-in PDF viewer.
-- **Real-time Dashboard**: Live updates across the application using WebSockets.
 - **Secure Architecture**: Sensitive operations (OAuth, API integrations, Firestore) are handled server-side with HTTP-only cookies and proxy endpoints.
 
 ## 🛠️ Tech Stack
