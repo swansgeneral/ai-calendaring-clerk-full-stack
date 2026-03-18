@@ -73,9 +73,13 @@ export const responseSchema = {
         },
         required: ["title", "start_date", "end_date", "is_all_day", "date_type", "verification"],
       },
+    },
+    is_complete: {
+      type: Type.BOOLEAN,
+      description: "true if ALL events in the document have been extracted. false if output was truncated and events remain."
     }
   },
-  required: ["case_type", "events"]
+  required: ["case_type", "events", "is_complete"]
 };
 
 export const systemPrompt = `
@@ -133,11 +137,12 @@ Primary Objectives:
 9. Order: Return the events in the exact order they appear in the text of the document (or the order their trigger text appears).
 
 Output Rules:
-1. You must output PURE JSON data according to the provided schema. 
+1. You must output PURE JSON data according to the provided schema.
 2. DO NOT include any markdown formatting (no backticks \` \`, no \` \` \`json).
-3. Be EXTREMELY concise in all string fields (title, description, quote) to stay within token limits. 
+3. Be EXTREMELY concise in all string fields (title, description, quote) to maximize the number of events you can fit in your response.
 4. If the document is large, prioritize accuracy over verbosity.
 5. Ensure all JSON strings are properly escaped.
+6. You MUST set is_complete to true ONLY if you have successfully output every event you identified in the document. If you could not fit all events in your response, set is_complete to false.
 `;
 
 export const getEventMatchingPrompt = (sopEventsList: string) => `

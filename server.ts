@@ -91,7 +91,94 @@ async function startServer() {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
-  // Gemini Analysis Proxy
+  // --- Helpers for multi-pass analysis ---
+
+  function parseGeminiResponse(text: string): any {
+    let cleaned = text.trim();
+    if (cleaned.startsWith("```json")) {
+      cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
+    } else if (cleaned.startsWith("```")) {
+      cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
+    }
+    const repaired = jsonrepair(cleaned);
+    return JSON.parse(repaired);
+  }
+
+  function buildContinuationPrompt(allEventsSoFar: any[]): string {
+    const lastEvent = allEventsSoFar[allEventsSoFar.length - 1];
+    const lastQuote = lastEvent?.verification?.quote || '';
+    const lastPage = lastEvent?.verification?.page || '?';
+
+    const skipList = allEventsSoFar.map(e => {
+      const quote = (e.verification?.quote || '').substring(0, 50);
+      return `- "${quote}" | ${e.start_date} | page ${e.verification?.page || '?'}`;
+    }).join('\n');
+
+    return `CONTINUATION INSTRUCTIONS (CRITICAL — READ CAREFULLY):
+
+You are continuing a multi-pass extraction of the same document.
+
+CURSOR — YOUR LAST EXTRACTION:
+The last event you extracted was identified by this text on page ${lastPage}:
+"${lastQuote}"
+
+Continue reading the document FROM THAT POINT FORWARD on page ${lastPage}.
+ONLY extract events that appear AFTER that quote in the document.
+
+The following ${allEventsSoFar.length} events have ALREADY been extracted.
+DO NOT include any of these again:
+${skipList}
+
+If there are no more events to extract, return an empty events array with is_complete: true.`;
+  }
+
+  function deduplicateEvents(events: any[]): any[] {
+    // Layer 3: Deterministic server-side dedup
+    // Primary key: normalized quote + date + time
+    const primaryMap = new Map<string, any>();
+    events.forEach(e => {
+      const normalizedQuote = String(e.verification?.quote || '').toLowerCase().replace(/[^a-z0-9]/g, '').trim();
+      const normalizedDate = e.start_date ? String(e.start_date).trim() : '';
+      const normalizedTime = e.start_time ? String(e.start_time).trim() : '';
+      const key = `${normalizedQuote}|${normalizedDate}|${normalizedTime}`;
+
+      if (!primaryMap.has(key)) {
+        primaryMap.set(key, e);
+      } else {
+        const existing = primaryMap.get(key);
+        const existingHasBB = existing.verification?.bounding_box && existing.verification.bounding_box.length === 4;
+        const currentHasBB = e.verification?.bounding_box && e.verification.bounding_box.length === 4;
+        const existingDescLen = (existing.description || '').length;
+        const currentDescLen = (e.description || '').length;
+        if ((!existingHasBB && currentHasBB) || (currentDescLen > existingDescLen + 5)) {
+          primaryMap.set(key, e);
+        }
+      }
+    });
+
+    // Secondary key: normalized title + date (catches same event with slightly different quotes)
+    const secondaryMap = new Map<string, any>();
+    Array.from(primaryMap.values()).forEach(e => {
+      const normalizedTitle = String(e.title || '').toLowerCase().replace(/[^a-z0-9]/g, '').trim();
+      const normalizedDate = e.start_date ? String(e.start_date).trim() : '';
+      const key = `${normalizedTitle}|${normalizedDate}`;
+
+      if (!secondaryMap.has(key)) {
+        secondaryMap.set(key, e);
+      } else {
+        const existing = secondaryMap.get(key);
+        const existingQuoteLen = (existing.verification?.quote || '').length;
+        const currentQuoteLen = (e.verification?.quote || '').length;
+        if (currentQuoteLen > existingQuoteLen) {
+          secondaryMap.set(key, e);
+        }
+      }
+    });
+
+    return Array.from(secondaryMap.values());
+  }
+
+  // Gemini Analysis Proxy (with cursor-based continuation loop)
   app.post("/api/gemini/analyze", async (req, res) => {
     const apiKey = process.env.API_KEY;
     if (!apiKey) {
@@ -112,31 +199,69 @@ async function startServer() {
         responseMimeType: "application/json",
         responseSchema: responseSchema,
         temperature: ENV_VARS.GEMINI_TEMPERATURE,
-        maxOutputTokens: 32768,
+        maxOutputTokens: ENV_VARS.GEMINI_MAX_OUTPUT_TOKENS,
       };
 
       if ((ENV_VARS as any).GEMINI_THINKING_LEVEL) {
         config.thinkingConfig = { thinkingLevel: (ENV_VARS as any).GEMINI_THINKING_LEVEL };
       }
 
-      const result = await ai.models.generateContent({
-        model,
-        contents: { parts: [filePart] },
-        config,
-      });
+      let allEvents: any[] = [];
+      let caseType: string | null = null;
+      let isComplete = false;
+      let pass = 0;
 
-      let text = result.text || "";
-      text = text.trim();
-      if (text.startsWith("```json")) {
-        text = text.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-      } else if (text.startsWith("```")) {
-        text = text.replace(/^```\s*/, "").replace(/\s*```$/, "");
+      while (!isComplete && pass < ENV_VARS.GEMINI_MAX_CONTINUATION_PASSES) {
+        pass++;
+
+        // Pass 1: just the PDF. Pass 2+: PDF + cursor-based continuation prompt
+        const parts: any[] = [filePart];
+        if (pass > 1) {
+          parts.push({ text: buildContinuationPrompt(allEvents) });
+        }
+
+        const result = await ai.models.generateContent({
+          model,
+          contents: { parts },
+          config,
+        });
+
+        const data = parseGeminiResponse(result.text || "");
+
+        // Accumulate new events
+        const newEvents = data.events || [];
+        allEvents.push(...newEvents);
+        caseType = caseType || data.case_type;
+
+        // Determine if we should continue
+        const finishReason = result.candidates?.[0]?.finishReason;
+        const wasTruncated = finishReason === "MAX_TOKENS";
+        const modelSaysIncomplete = data.is_complete === false && newEvents.length > 0;
+        const noNewEvents = pass > 1 && newEvents.length === 0;
+
+        // STOP when: no new events (rock-solid), or natural completion with model confirmation
+        // CONTINUE when: truncated, or model says incomplete and still finding events
+        if (noNewEvents) {
+          isComplete = true;
+        } else if (wasTruncated || modelSaysIncomplete) {
+          isComplete = false;
+        } else {
+          isComplete = true;
+        }
+
+        console.log(`[Analyze] Pass ${pass}: ${newEvents.length} events, ` +
+          `finishReason=${finishReason}, is_complete=${data.is_complete}, ` +
+          `continuing=${!isComplete}`);
       }
 
-      const repairedText = jsonrepair(text);
-      const resultData = JSON.parse(repairedText);
-      
-      res.json(resultData);
+      // Server-side dedup (Layer 3)
+      const dedupedEvents = deduplicateEvents(allEvents);
+      const dupsRemoved = allEvents.length - dedupedEvents.length;
+      console.log(`[Analyze] Complete: ${pass} pass(es), ` +
+        `${allEvents.length} raw → ${dedupedEvents.length} deduped events` +
+        (dupsRemoved > 0 ? ` (${dupsRemoved} duplicates removed)` : ''));
+
+      res.json({ case_type: caseType, events: dedupedEvents });
     } catch (error: any) {
       console.error("Gemini Analysis Error:", error);
       res.status(500).json({ error: error.message });

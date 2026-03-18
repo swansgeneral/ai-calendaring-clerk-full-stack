@@ -20,6 +20,8 @@ export const ENV_VARS = {
   GEMINI_MODEL: 'gemini-3-flash-preview',
   GEMINI_THINKING_LEVEL: ThinkingLevel.MEDIUM,
   GEMINI_TEMPERATURE: 0.1,
+  GEMINI_MAX_OUTPUT_TOKENS: 65536,
+  GEMINI_MAX_CONTINUATION_PASSES: 10,
   
   // Prompt Configuration
   NAMING_CONVENTION: "Use professional legal terminology and common sense to create concise, accurate titles for the events.",
