@@ -21,7 +21,7 @@ const formatTimeAMPM = (timeStr?: string): string => {
  * Formats and triggers a download for an ICS calendar file.
  */
 export const exportToICS = (events: Event[]): void => {
-  let icsContent = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//Swans//EN\nCALSCALE:GREGORIAN\n";
+  let icsContent = "BEGIN:VCALENDAR\nVERSION:2.0\nPRODID:-//AI Calendaring Clerk//EN\nCALSCALE:GREGORIAN\n";
   const timezone = ENV_VARS.TIMEZONE;
   
   events.forEach(event => {

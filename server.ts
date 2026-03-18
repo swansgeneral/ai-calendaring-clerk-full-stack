@@ -904,7 +904,7 @@ If there are no more events to extract, return an empty events array with is_com
                 const recipients = Array.from(recipientIds);
 
                 if (reminder.type === 'Calendar Event') {
-                  const reminderTitle = `General Info - ${clientLastName}: ${reminder.calendarTitle || event.title}`;
+                  const reminderTitle = `${clientLastName}: ${reminder.calendarTitle || event.title}`;
                   const reminderDate = calculateReminderDate(event.start_date, reminder.quantity, reminder.unit, event.is_all_day, event.start_time, timezone);
                   const reminderDateStr = reminderDate.toISO() || "";
 

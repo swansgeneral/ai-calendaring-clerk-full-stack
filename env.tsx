@@ -30,7 +30,7 @@ export const ENV_VARS = {
   // Logic Defaults
   DEFAULT_EVENT_DURATION_MINUTES: 120,
   DEFAULT_EVENT_START_TIME: "09:00",
-  TIMEZONE: "America/New_York",
+  TIMEZONE: "America/New_York", // Must be a valid IANA tz database code (e.g. "America/Los_Angeles", "Europe/London"). Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
   
   // UI Simulation & Timeouts
   GET_CALENDARS_TIMEOUT: 60000,
