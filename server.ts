@@ -75,11 +75,8 @@ async function startServer() {
       // Allow if:
       // 1. No origin (same-origin, mobile, curl)
       // 2. Matches APP_URL exactly
-      // 3. APP_URL is "*"
-      // 4. It's a .run.app subdomain (common in AI Studio preview)
-      const isRunApp = origin && (origin.endsWith(".run.app") || origin.includes(".googleusercontent.com"));
-      
-      if (!origin || origin === allowedOrigin || allowedOrigin === "*" || isRunApp) {
+      // 3. APP_URL is "*" (dev fallback when APP_URL is not set)
+      if (!origin || origin === allowedOrigin || allowedOrigin === "*") {
         callback(null, true);
       } else {
         console.warn(`CORS blocked request from origin: ${origin}`);
@@ -573,41 +570,75 @@ async function startServer() {
 
   app.post("/api/clio/export-direct", async (req, res) => {
     const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = req.body;
-    
+
     if (!matterDisplayNumber) {
       return res.status(400).json({ error: "Matter Display Number is required" });
     }
 
+    // Set SSE headers — from this point all responses are streamed frames
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.flushHeaders();
+
+    const sendEvent = (data: object) => {
+      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    };
+
+    let clientDisconnected = false;
+    req.on('close', () => { clientDisconnected = true; });
+
+    // Calculate total operations for progress: 2 setup + 1 per event + 1 per reminder
+    const totalOps = 2 + (events?.length || 0) + (events || []).reduce((sum: number, evt: any) => {
+      return sum + (evt.reminders?.length || 0);
+    }, 0);
+    let currentOp = 0;
+
     try {
       // 1. Resolve Matter
+      if (clientDisconnected) return res.end();
+      sendEvent({ type: 'progress', current: currentOp, total: totalOps });
+
       const matterResponse = await callClioApi(req, res, `https://app.clio.com/api/v4/matters.json?query=${encodeURIComponent(matterDisplayNumber)}&fields=id,display_number,client{id,last_name}`);
-      if (!matterResponse) return; 
-      
-      if (!matterResponse.ok) {
-        return res.status(matterResponse.status).json({ error: "Failed to fetch matter from Clio" });
+      if (!matterResponse) {
+        sendEvent({ type: 'error', message: 'Not authenticated with Clio.' });
+        return res.end();
       }
-      
+
+      if (!matterResponse.ok) {
+        sendEvent({ type: 'error', message: 'Failed to fetch matter from Clio.' });
+        return res.end();
+      }
+
       const mattersData = await matterResponse.json();
       const matter = mattersData.data.find((m: any) => m.display_number === matterDisplayNumber);
-      
+
       if (!matter) {
-        return res.status(404).json({ error: `Matter "${matterDisplayNumber}" not found in Clio.` });
+        sendEvent({ type: 'error', message: `Matter "${matterDisplayNumber}" not found in Clio.` });
+        return res.end();
       }
 
       const clientLastName = matter.client?.last_name || "Client";
       const clientId = matter.client?.id;
 
       // 2. Fetch All Clio Users for resolution (including notification methods)
+      currentOp++;
+      if (clientDisconnected) return res.end();
+      sendEvent({ type: 'progress', current: currentOp, total: totalOps });
+
       const usersResponse = await callClioApi(req, res, "https://app.clio.com/api/v4/users.json?fields=id,name,subscription_type,default_calendar_id,notification_methods");
-      if (!usersResponse) return;
-      
+      if (!usersResponse) {
+        sendEvent({ type: 'error', message: 'Not authenticated with Clio.' });
+        return res.end();
+      }
+
       const usersData = await usersResponse.json();
       const allUsers = usersData.data;
 
       let entriesCreated = 0;
       let remindersSent = 0;
       const errors: string[] = [];
-      
+
       const ensureSeconds = (t: string) => {
         if (!t) return "00:00:00";
         return t.split(':').length === 2 ? `${t}:00` : t;
@@ -624,7 +655,7 @@ async function startServer() {
       const calculateReminderDate = (baseDateStr: string, quantity: number, unit: string, isAllDay: boolean, timeStr?: string, tz?: string) => {
         let date: DateTime;
         const zone = tz || "UTC";
-        
+
         if (isAllDay) {
           date = DateTime.fromISO(`${baseDateStr}T00:00:00`, { zone });
         } else {
@@ -641,10 +672,14 @@ async function startServer() {
 
       // 3. Iterate through events
       for (const event of events) {
+        currentOp++;
+        if (clientDisconnected) return res.end();
+        sendEvent({ type: 'progress', current: currentOp, total: totalOps });
+
         try {
           // Resolve Attendees
           const attendeeIds = new Set<number>();
-          
+
           if (event.inviteAllAttorneys && involvedAttorneys) {
             involvedAttorneys.forEach((u: any) => attendeeIds.add(u.calendar_id));
           }
@@ -659,7 +694,7 @@ async function startServer() {
 
           // Create Primary Calendar Entry
           const eventTitle = `${clientLastName}: ${event.title}`;
-          
+
           let startAt: string;
           let endAt: string;
 
@@ -697,7 +732,7 @@ async function startServer() {
             }
           };
 
-          console.log(`Creating event: ${eventTitle}`, JSON.stringify(calendarEntryPayload));
+          console.log(`Creating event: ${eventTitle}`);
 
           const createEventResponse = await callClioApi(req, res, "https://app.clio.com/api/v4/calendar_entries.json", {
             method: "POST",
@@ -739,6 +774,10 @@ async function startServer() {
           // 4. Iterate through reminders
           if (event.reminders && event.reminders.length > 0) {
             for (const reminder of event.reminders) {
+              currentOp++;
+              if (clientDisconnected) return res.end();
+              sendEvent({ type: 'progress', current: currentOp, total: totalOps });
+
               try {
                 // Resolve Recipients
                 const recipientIds = new Set<number>();
@@ -758,7 +797,7 @@ async function startServer() {
                   const reminderTitle = `General Info - ${clientLastName}: ${reminder.calendarTitle || event.title}`;
                   const reminderDate = calculateReminderDate(event.start_date, reminder.quantity, reminder.unit, event.is_all_day, event.start_time, timezone);
                   const reminderDateStr = reminderDate.toISO() || "";
-                  
+
                   const reminderEndDateStr = reminderDate.plus({ days: 1 }).startOf('day').toISO() || "";
 
                   const reminderCalendarPayload = {
@@ -839,18 +878,13 @@ async function startServer() {
         }
       }
 
-      res.json({
-        success: true,
-        summary: {
-          entriesCreated,
-          remindersSent
-        },
-        errors: errors.length > 0 ? errors : undefined
-      });
+      sendEvent({ type: 'complete', summary: { entriesCreated, remindersSent }, errors });
+      res.end();
 
     } catch (error: any) {
       console.error("Direct Export Error:", error);
-      res.status(500).json({ error: error.message });
+      sendEvent({ type: 'error', message: error.message });
+      res.end();
     }
   });
 

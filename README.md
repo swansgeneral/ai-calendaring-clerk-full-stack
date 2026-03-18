@@ -16,7 +16,7 @@ The AI Calendaring Clerk V2 automates the complex process of docketing by combin
 - **SOP Rules Engine**: Configure firm-wide rules in a dedicated dashboard. Map extracted events to specific Clio calendars and set automatic reminders (Email or Calendar).
 - **Dynamic Descriptions**: AI-powered description enrichment that fills placeholders (e.g., `[Matter Name]`) with actual data from the document.
 - **Source Verification**: Provides 1:1 verbatim quotes and page numbers for every extracted date, with integrated visual highlighting in the built-in PDF viewer.
-- **Secure Architecture**: Sensitive operations (OAuth, API integrations, Firestore) are handled server-side with HTTP-only cookies and proxy endpoints.
+- **Secure Architecture**: Sensitive operations (OAuth, API integrations, Firestore) are handled server-side with HTTP-only cookies and proxy endpoints. Access is restricted to authorized Google accounts via Identity-Aware Proxy (IAP).
 
 ## 🛠️ Tech Stack
 
@@ -32,7 +32,7 @@ The AI Calendaring Clerk V2 automates the complex process of docketing by combin
 2. **Connect Clio**: Click **Connect Clio** to authorize the application.
 3. **Upload**: Drag and drop a legal PDF (e.g., a Scheduling Order).
 4. **Analyze**: The AI extracts dates, matches them against your SOPs, and applies your rules.
-5. **Review & Verify**: 
+5. **Review & Verify**:
    - Use the side-by-side viewer to verify extracted dates against the source text.
    - Click the **Search** icon to jump to the exact location in the PDF.
 6. **Export**: Select events and click **Export to System** to sync them directly with your practice management system.
@@ -98,11 +98,12 @@ A **fork** is your own copy of this codebase hosted under your GitHub account. Y
 
    > **Note:** If no repositories appear, you may need to install the **Google Cloud Build** GitHub App first. Click **Install Google Cloud Build** when prompted, authorize it on your GitHub account, and grant it access to your forked repository. Then return to Cloud Build and your repository will appear in the list.
 
-**Security (recommended):** Enable **Identity-Aware Proxy (IAP)** authentication to restrict access to Google accounts within your domain only.
+**Security (IMPORTANT):** Enable **Identity-Aware Proxy (IAP)** authentication to restrict access to Google accounts within your domain only.
 
 ![IAP configuration screen](docs/images/cloud-run-iap.png)
 
 4. Click **Create** and wait for the initial deployment to complete
+
 5. Once deployed, copy your app URL from the service details page — you will need it in later steps
 
 ![Cloud Run service details showing the app URL](docs/images/cloud-run-app-url.png)
@@ -127,6 +128,7 @@ A **fork** is your own copy of this codebase hosted under your GitHub account. Y
 
 ### Step 6 — Create a Clio Developer App
 
+
 1. Go to the [Clio Developer Portal](https://developers.clio.com/) and sign in
 2. Click **Create App** and fill in the details:
    - **Name:** anything descriptive
@@ -146,7 +148,7 @@ A **fork** is your own copy of this codebase hosted under your GitHub account. Y
 
 ---
 
-### Step 8 — Add Environment Variables to Cloud Run
+### Step 8 — Configure & Redeploy: Environment Variables & Timeout
 
 1. Go to your Cloud Run service and click **Edit & deploy new revision**
 
@@ -164,4 +166,6 @@ A **fork** is your own copy of this codebase hosted under your GitHub account. Y
 | `CLIO_CLIENT_SECRET` | From the Clio Developer Portal (Step 6) |
 | `API_KEY` | Your Gemini API key (Step 7) |
 
-3. Click **Deploy** and wait for the new revision to go live. Your app is now fully configured and ready to use. 
+3. Still in the same revision editor, scroll down to the **Requests** section and set **Request timeout** to `600` seconds. This is required for large exports with many events and reminders.
+
+4. Click **Deploy** and wait for the new revision to go live. Your app is now fully configured and ready to use.

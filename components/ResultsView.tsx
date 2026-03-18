@@ -29,54 +29,18 @@ interface ExportModalProps {
   errorMessage?: string;
   selectedEvents: Event[];
   summary?: { entriesCreated: number; remindersSent: number };
+  progressValue?: number;
 }
 
-const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, onSubmit, status, errorMessage, selectedEvents, summary }) => {
+const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, onSubmit, status, errorMessage, selectedEvents, summary, progressValue }) => {
   const [matterDisplayNumber, setMatterDisplayNumber] = useState('');
-  const [progress, setProgress] = useState(0);
 
-  // Reset state when modal opens/closes
+  // Reset matter number when modal opens fresh
   useEffect(() => {
     if (isOpen && status === 'idle') {
-      setProgress(0);
+      setMatterDisplayNumber('');
     }
   }, [isOpen, status]);
-
-  // Calculate duration and run progress bar when submitting
-  useEffect(() => {
-    let interval: number;
-    if (status === 'submitting') {
-      setProgress(0);
-      
-      // Calculate Duration based on requirements:
-      // 1s per Event + 1.7s per Reminder
-      let totalDurationMs = 0;
-      selectedEvents.forEach(evt => {
-        totalDurationMs += 1000; // 1s per event
-        if (evt.reminders) {
-          totalDurationMs += (evt.reminders.length * 1700); // 1.7s per reminder
-        }
-      });
-
-      // Ensure a minimum visual duration so it doesn't flash too fast (e.g., 1.5s)
-      totalDurationMs = Math.max(totalDurationMs, 1500);
-
-      const startTime = Date.now();
-      
-      interval = window.setInterval(() => {
-        const elapsed = Date.now() - startTime;
-        // Cap at 95% until success is actually returned
-        const newProgress = Math.min(Math.floor((elapsed / totalDurationMs) * 100), 95);
-        setProgress(newProgress);
-      }, 50);
-    } else if (status === 'success') {
-      setProgress(100);
-    }
-    
-    return () => {
-      if (interval) clearInterval(interval);
-    };
-  }, [status, selectedEvents]);
 
   if (!isOpen) return null;
 
@@ -153,15 +117,15 @@ const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, onSubmit, st
             <div className="space-y-2 pt-2 animate-fade-in">
               <div className="flex justify-between items-end">
                 <span className="text-xs font-bold text-[#00076F] uppercase tracking-wider">Syncing Schedule...</span>
-                <span className="text-xs font-bold text-gray-500">{progress}%</span>
+                <span className="text-xs font-bold text-gray-500">{progressValue ?? 0}%</span>
               </div>
               <div className="w-full bg-gray-100 rounded-full h-2 overflow-hidden border border-gray-200">
-                <div 
-                  className="bg-[#00076F] h-full rounded-full transition-all duration-75 ease-out shadow-[0_0_8px_rgba(0,7,111,0.3)]"
-                  style={{ width: `${progress}%` }}
+                <div
+                  className="bg-[#00076F] h-full rounded-full transition-all duration-150 ease-out shadow-[0_0_8px_rgba(0,7,111,0.3)]"
+                  style={{ width: `${progressValue ?? 0}%` }}
                 ></div>
               </div>
-              <p className="text-[11px] text-gray-400 italic text-center pt-1">Processing {selectedEvents.length} events and associated reminders</p>
+              <p className="text-[11px] text-gray-400 italic text-center pt-1">Do not close this window during export.</p>
             </div>
           )}
 
@@ -459,6 +423,7 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
   const [submissionStatus, setSubmissionStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>('idle');
   const [submissionError, setSubmissionError] = useState<string | undefined>(undefined);
   const [exportSummary, setExportSummary] = useState<{ entriesCreated: number; remindersSent: number } | undefined>(undefined);
+  const [exportProgress, setExportProgress] = useState(0);
   const [sidebarWidth, setSidebarWidth] = useState(window.innerWidth / 2);
   const [isResizing, setIsResizing] = useState(false);
   const [isMobile, setIsMobile] = useState(false);
@@ -708,28 +673,69 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
         events: eventsWithMetadata
       };
 
-      const endpoint = '/api/clio/export-direct';
-      const response = await fetch(endpoint, {
+      setExportProgress(0);
+
+      const response = await fetch('/api/clio/export-direct', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
-      if (!response.ok) {
+      // A non-OK status here means SSE headers were never sent (e.g. 400 missing matter number)
+      if (!response.ok || !response.body) {
         const errorText = await response.text();
         throw new Error(`Error ${response.status}: ${errorText || response.statusText}`);
       }
 
-      const result = await response.json();
-      setExportSummary(result.summary);
-      setSubmissionStatus('success');
-      setTimeout(() => { 
-        setIsExportModalOpen(false); 
-        setSubmissionStatus('idle');
-        setExportSummary(undefined);
-      }, ENV_VARS.POST_EVENTS_UI_RESET_DELAY);
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let completed = false;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        // SSE frames are separated by double newlines
+        const frames = buffer.split('\n\n');
+        buffer = frames.pop() ?? '';
+
+        for (const frame of frames) {
+          if (!frame.startsWith('data: ')) continue;
+          try {
+            const data = JSON.parse(frame.slice(6));
+
+            if (data.type === 'progress') {
+              const pct = data.total > 0 ? Math.round((data.current / data.total) * 95) : 0;
+              setExportProgress(pct);
+
+            } else if (data.type === 'complete') {
+              completed = true;
+              setExportProgress(100);
+              setExportSummary(data.summary);
+              setSubmissionStatus('success');
+              setTimeout(() => {
+                setIsExportModalOpen(false);
+                setSubmissionStatus('idle');
+                setExportSummary(undefined);
+                setExportProgress(0);
+              }, ENV_VARS.POST_EVENTS_UI_RESET_DELAY);
+
+            } else if (data.type === 'error') {
+              throw new Error(data.message);
+            }
+          } catch (parseErr: any) {
+            if (parseErr instanceof SyntaxError) continue;
+            throw parseErr;
+          }
+        }
+      }
+
+      // Guard against stream closing without a complete frame (e.g. server crash)
+      if (!completed) {
+        throw new Error('Export ended unexpectedly. Some events may not have been created. Please check Clio before retrying.');
+      }
     } catch (e: any) { setSubmissionStatus('error'); setSubmissionError(e.message); }
   };
 
@@ -891,14 +897,15 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
 
       <AnimatePresence>
         {isExportModalOpen && (
-          <ExportModal 
-            isOpen={isExportModalOpen} 
-            onClose={() => setIsExportModalOpen(false)} 
-            onSubmit={handlePostEventsSubmit} 
-            status={submissionStatus} 
-            errorMessage={submissionError} 
-            selectedEvents={events.filter(e => e.selected)} 
+          <ExportModal
+            isOpen={isExportModalOpen}
+            onClose={() => setIsExportModalOpen(false)}
+            onSubmit={handlePostEventsSubmit}
+            status={submissionStatus}
+            errorMessage={submissionError}
+            selectedEvents={events.filter(e => e.selected)}
             summary={exportSummary}
+            progressValue={exportProgress}
           />
         )}
       </AnimatePresence>
