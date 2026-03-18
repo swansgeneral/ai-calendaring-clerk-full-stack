@@ -96,6 +96,8 @@ A **fork** is your own copy of this codebase hosted under your GitHub account. Y
 
 3. Connect your GitHub account and select your forked repository, set the branch to `main`, and click **Next**
 
+   > **Note:** If no repositories appear, you may need to install the **Google Cloud Build** GitHub App first. Click **Install Google Cloud Build** when prompted, authorize it on your GitHub account, and grant it access to your forked repository. Then return to Cloud Build and your repository will appear in the list.
+
 **Security (recommended):** Enable **Identity-Aware Proxy (IAP)** authentication to restrict access to Google accounts within your domain only.
 
 ![IAP configuration screen](docs/images/cloud-run-iap.png)
