@@ -131,7 +131,9 @@ A **fork** is your own copy of this codebase hosted under your GitHub account. Y
    - **Website URL:** your firm's website (e.g. `https://yourfirm.com`)
    - **Redirect URL:** your app URL + `/api/auth/clio/callback`
      - Example: `https://your-app-405499094876.us-south1.run.app/api/auth/clio/callback`
-3. Save the app and note down the **Client ID** and **Client Secret**
+3. Under **Permissions**, enable **Read and Write** access for the following scopes:
+   - API, Calendars, Contacts, Custom Fields, Imports, General, Matters, Users, Webhooks, Custom Actions, Activities
+4. Save the app and note down the **Client ID** and **Client Secret**
 
 ---
 
