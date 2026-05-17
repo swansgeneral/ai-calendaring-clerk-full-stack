@@ -687,70 +687,151 @@ If there are no more events to extract, return an empty events array with is_com
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
   app.post("/api/clio/export-direct", async (req, res) => {
+    // Correlation id so every log line for this request can be grepped in KQL
+    const reqId = Math.random().toString(36).slice(2, 10);
+    const startedAt = Date.now();
+    const elapsed = () => `${Date.now() - startedAt}ms`;
+    // Force unbuffered stdout so logs surface in Container Apps even on early termination
+    const log = (msg: string, extra?: object) => {
+      const line = `[export reqId=${reqId} t=${elapsed()}] ${msg}` + (extra ? ` ${JSON.stringify(extra)}` : '');
+      process.stdout.write(line + '\n');
+    };
+    const logErr = (msg: string, err: any) => {
+      const line = `[export reqId=${reqId} t=${elapsed()}] ERROR ${msg}: ${err?.message || err} | stack=${err?.stack || 'no-stack'}`;
+      process.stderr.write(line + '\n');
+    };
+
     const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = req.body;
 
+    log('handler entered', {
+      matterDisplayNumber,
+      eventCount: events?.length || 0,
+      hasAttorneys: !!involvedAttorneys?.length,
+      hasStaff: !!involvedStaff?.length,
+      timezone,
+      hasAccessToken: !!req.cookies.clio_access_token,
+      hasRefreshToken: !!req.cookies.clio_refresh_token,
+    });
+
     if (!matterDisplayNumber) {
+      log('rejected: missing matterDisplayNumber');
       return res.status(400).json({ error: "Matter Display Number is required" });
     }
 
     // Set SSE headers — from this point all responses are streamed frames
     res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
     res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
+    log('SSE headers flushed');
 
     const sendEvent = (data: object) => {
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
+      try {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+      } catch (err: any) {
+        logErr('sendEvent write failed', err);
+      }
     };
 
     let clientDisconnected = false;
-    req.on('close', () => { clientDisconnected = true; });
+    req.on('close', () => {
+      clientDisconnected = true;
+      log('req close event fired', { writableEnded: res.writableEnded, writableFinished: res.writableFinished });
+    });
+    res.on('close', () => log('res close event fired', { writableEnded: res.writableEnded }));
+    res.on('finish', () => log('res finish event fired'));
+    res.on('error', (err) => logErr('res error event', err));
 
     // Calculate total operations for progress: 2 setup + 1 per event + 1 per reminder
     const totalOps = 2 + (events?.length || 0) + (events || []).reduce((sum: number, evt: any) => {
       return sum + (evt.reminders?.length || 0);
     }, 0);
     let currentOp = 0;
+    log('totalOps computed', { totalOps });
 
     try {
       // 1. Resolve Matter
-      if (clientDisconnected) return res.end();
+      if (clientDisconnected) {
+        log('client disconnected before matter lookup, ending');
+        return res.end();
+      }
       sendEvent({ type: 'progress', current: currentOp, total: totalOps });
+      log('about to call Clio matters API');
 
-      const matterResponse = await callClioApi(req, res, `https://app.clio.com/api/v4/matters.json?query=${encodeURIComponent(matterDisplayNumber)}&fields=id,display_number,client{id,last_name}`);
+      let matterResponse;
+      try {
+        matterResponse = await callClioApi(req, res, `https://app.clio.com/api/v4/matters.json?query=${encodeURIComponent(matterDisplayNumber)}&fields=id,display_number,client{id,last_name}`);
+        log('Clio matters API returned', { isNull: !matterResponse, status: matterResponse?.status, ok: matterResponse?.ok });
+      } catch (err: any) {
+        logErr('callClioApi threw during matters lookup', err);
+        sendEvent({ type: 'error', message: `Matters lookup failed: ${err?.message || err}` });
+        return res.end();
+      }
+
       if (!matterResponse) {
+        log('matterResponse is null (likely missing/expired Clio token)');
         sendEvent({ type: 'error', message: 'Not authenticated with Clio.' });
         return res.end();
       }
 
       if (!matterResponse.ok) {
-        sendEvent({ type: 'error', message: 'Failed to fetch matter from Clio.' });
+        const errBody = await matterResponse.text().catch(() => '<unreadable>');
+        log('matters API returned non-OK', { status: matterResponse.status, body: errBody.slice(0, 500) });
+        sendEvent({ type: 'error', message: `Failed to fetch matter from Clio (status ${matterResponse.status}).` });
         return res.end();
       }
 
-      const mattersData = await matterResponse.json();
+      let mattersData;
+      try {
+        mattersData = await matterResponse.json();
+      } catch (err: any) {
+        logErr('matters response JSON parse failed', err);
+        sendEvent({ type: 'error', message: 'Could not parse Clio matters response.' });
+        return res.end();
+      }
+      log('matters response parsed', { candidateCount: mattersData?.data?.length || 0 });
+
       const matter = mattersData.data.find((m: any) => m.display_number === matterDisplayNumber);
 
       if (!matter) {
+        const candidates = (mattersData.data || []).map((m: any) => m.display_number).slice(0, 10);
+        log('matter not in candidates', { searched: matterDisplayNumber, candidates });
         sendEvent({ type: 'error', message: `Matter "${matterDisplayNumber}" not found in Clio.` });
         return res.end();
       }
+
+      log('matter resolved', { id: matter.id, display_number: matter.display_number });
 
       const clientLastName = matter.client?.last_name || "Client";
       const clientId = matter.client?.id;
 
       // 2. Fetch All Clio Users for resolution (including notification methods)
       currentOp++;
-      if (clientDisconnected) return res.end();
+      if (clientDisconnected) {
+        log('client disconnected before users lookup, ending');
+        return res.end();
+      }
       sendEvent({ type: 'progress', current: currentOp, total: totalOps });
+      log('about to call Clio users API');
 
-      const usersResponse = await callClioApi(req, res, "https://app.clio.com/api/v4/users.json?fields=id,name,subscription_type,default_calendar_id,notification_methods");
+      let usersResponse;
+      try {
+        usersResponse = await callClioApi(req, res, "https://app.clio.com/api/v4/users.json?fields=id,name,subscription_type,default_calendar_id,notification_methods");
+        log('Clio users API returned', { isNull: !usersResponse, status: usersResponse?.status, ok: usersResponse?.ok });
+      } catch (err: any) {
+        logErr('callClioApi threw during users lookup', err);
+        sendEvent({ type: 'error', message: `Users lookup failed: ${err?.message || err}` });
+        return res.end();
+      }
+
       if (!usersResponse) {
         sendEvent({ type: 'error', message: 'Not authenticated with Clio.' });
         return res.end();
       }
 
       const usersData = await usersResponse.json();
+      log('users response parsed', { userCount: usersData?.data?.length || 0 });
       const allUsers = usersData.data;
 
       let entriesCreated = 0;
@@ -789,10 +870,15 @@ If there are no more events to extract, return an empty events array with is_com
       };
 
       // 3. Iterate through events
-      for (const event of events) {
+      log('entering per-event loop', { eventCount: events.length });
+      for (const [eventIdx, event] of (events as any[]).entries()) {
         currentOp++;
-        if (clientDisconnected) return res.end();
+        if (clientDisconnected) {
+          log('client disconnected during event loop, ending', { eventIdx });
+          return res.end();
+        }
         sendEvent({ type: 'progress', current: currentOp, total: totalOps });
+        log('processing event', { eventIdx, title: event.title, date: event.date });
 
         try {
           // Resolve Attendees
@@ -996,11 +1082,12 @@ If there are no more events to extract, return an empty events array with is_com
         }
       }
 
+      log('export complete', { entriesCreated, remindersSent, errorCount: errors.length });
       sendEvent({ type: 'complete', summary: { entriesCreated, remindersSent }, errors });
       res.end();
 
     } catch (error: any) {
-      console.error("Direct Export Error:", error);
+      logErr('uncaught error in export handler', error);
       sendEvent({ type: 'error', message: error.message });
       res.end();
     }
