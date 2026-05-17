@@ -4,7 +4,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
-import admin from "firebase-admin";
+import { CosmosClient, Container } from "@azure/cosmos";
 import { DateTime } from "luxon";
 import { GoogleGenAI, Type } from "@google/genai";
 import { jsonrepair } from "jsonrepair";
@@ -15,25 +15,26 @@ const PORT = Number(process.env.PORT) || 3000;
 console.log(`Initializing server on port ${PORT}...`);
 console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
-// Initialize Firebase Admin
-let db: admin.firestore.Firestore | null = null;
+// Initialize Cosmos DB
+const COSMOS_DATABASE = process.env.COSMOS_DATABASE || "calendaring_clerk";
+const COSMOS_CONTAINER = process.env.COSMOS_CONTAINER || "sop_data";
+const COSMOS_SOP_DOC_ID = process.env.COSMOS_SOP_DOC_ID || "main_document";
+
+let container: Container | null = null;
 try {
-  if (process.env.FIREBASE_PRIVATE_KEY) {
-    const serviceAccountJson = JSON.parse(process.env.FIREBASE_PRIVATE_KEY);
-    const credential = admin.credential.cert(serviceAccountJson);
-    
-    admin.initializeApp({ credential });
-    db = admin.firestore();
-    console.log("✅ Firebase Admin initialized successfully.");
+  if (process.env.COSMOS_ENDPOINT && process.env.COSMOS_KEY) {
+    const client = new CosmosClient({
+      endpoint: process.env.COSMOS_ENDPOINT,
+      key: process.env.COSMOS_KEY,
+    });
+    container = client.database(COSMOS_DATABASE).container(COSMOS_CONTAINER);
+    console.log("✅ Cosmos DB client initialized successfully.");
   } else {
-    console.warn("⚠️ Firebase credentials missing. Database will not be initialized.");
+    console.warn("⚠️ Cosmos DB credentials missing. Database will not be initialized.");
   }
 } catch (error) {
-  console.error("❌ Failed to initialize Firebase Admin:", error);
+  console.error("❌ Failed to initialize Cosmos DB:", error);
 }
-
-const FIRESTORE_COLLECTION = "sop_data";
-const FIRESTORE_DOC_ID = "main_document";
 
 async function startServer() {
   const app = express();
@@ -376,22 +377,32 @@ If there are no more events to extract, return an empty events array with is_com
 
   app.get("/api/sop-data", async (req, res) => {
     try {
-      if (db) {
-        // Fetch from Firestore
-        const docRef = db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC_ID);
-        const doc = await docRef.get();
-        if (doc.exists) {
-          res.json([doc.data()]); // Wrap in array to match expected structure
+      if (!container) {
+        return res.status(500).json({ error: "Database not initialized" });
+      }
+      try {
+        const { resource } = await container
+          .item(COSMOS_SOP_DOC_ID, COSMOS_SOP_DOC_ID)
+          .read();
+        if (resource) {
+          const { id, _rid, _self, _etag, _attachments, _ts, ...data } = resource;
+          res.json([data]);
         } else {
-          // If document doesn't exist in Firestore, return empty structure
-          console.log("Firestore document not found, returning empty default.");
+          console.log("Cosmos document not found, returning empty default.");
           res.json([{
             "Reminders": [],
             "Calendar Events": []
           }]);
         }
-      } else {
-        res.status(500).json({ error: "Database not initialized" });
+      } catch (err: any) {
+        if (err.code === 404) {
+          console.log("Cosmos document not found, returning empty default.");
+          return res.json([{
+            "Reminders": [],
+            "Calendar Events": []
+          }]);
+        }
+        throw err;
       }
     } catch (error) {
       console.error("Error reading SOP data:", error);
@@ -401,20 +412,17 @@ If there are no more events to extract, return an empty events array with is_com
 
   app.post("/api/sop-data", async (req, res) => {
     try {
-      if (!db) {
+      if (!container) {
         return res.status(500).json({ error: "Database not initialized" });
       }
-      
+
       const newData = req.body;
       const dataToSave = Array.isArray(newData) ? newData[0] : newData;
 
-      // Save to Firestore
-      const docRef = db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC_ID);
-      await docRef.set(dataToSave);
-      
-      // Broadcast update to all connected clients
+      await container.items.upsert({ id: COSMOS_SOP_DOC_ID, ...dataToSave });
+
       broadcast({ type: 'SOP_UPDATE', data: newData });
-      
+
       res.json({ success: true });
     } catch (error) {
       console.error("Error writing SOP data:", error);
