@@ -523,7 +523,13 @@ const App: React.FC = () => {
                   </button>
                   <button
                     onClick={() => handleViewChange('database')}
-                    className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all cursor-pointer ${view === 'database' ? 'bg-white/10 text-white shadow-md' : 'text-white/60 hover:text-white hover:bg-white/5 hover:shadow-md'}`}
+                    disabled={analysisState.status === 'analyzing'}
+                    title={analysisState.status === 'analyzing' ? 'Available after document processing finishes' : undefined}
+                    className={`flex items-center gap-2 px-3 py-1.5 rounded-md text-sm font-medium transition-all ${
+                      analysisState.status === 'analyzing'
+                        ? 'text-white/40 cursor-not-allowed'
+                        : `cursor-pointer ${view === 'database' ? 'bg-white/10 text-white shadow-md' : 'text-white/60 hover:text-white hover:bg-white/5 hover:shadow-md'}`
+                    }`}
                   >
                     <Database className="w-4 h-4" />
                     SOP Database
