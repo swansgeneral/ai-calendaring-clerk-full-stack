@@ -7,8 +7,7 @@ import { createServer } from "http";
 import { CosmosClient, Container } from "@azure/cosmos";
 import admin from "firebase-admin";
 import { DateTime } from "luxon";
-import { GoogleGenAI, Type } from "@google/genai";
-import { jsonrepair } from "jsonrepair";
+import Anthropic from "@anthropic-ai/sdk";
 import { systemPrompt, responseSchema, getEventMatchingPrompt, eventMatchingResponseSchema } from "./prompts/systemPrompt";
 import { ENV_VARS } from "./env";
 
@@ -256,46 +255,7 @@ async function startServer() {
     res.json({ status: "ok", timestamp: new Date().toISOString() });
   });
 
-  // --- Helpers for multi-pass analysis ---
-
-  function parseGeminiResponse(text: string): any {
-    let cleaned = text.trim();
-    if (cleaned.startsWith("```json")) {
-      cleaned = cleaned.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-    } else if (cleaned.startsWith("```")) {
-      cleaned = cleaned.replace(/^```\s*/, "").replace(/\s*```$/, "");
-    }
-    const repaired = jsonrepair(cleaned);
-    return JSON.parse(repaired);
-  }
-
-  function buildContinuationPrompt(allEventsSoFar: any[]): string {
-    const lastEvent = allEventsSoFar[allEventsSoFar.length - 1];
-    const lastQuote = lastEvent?.verification?.quote || '';
-    const lastPage = lastEvent?.verification?.page || '?';
-
-    const skipList = allEventsSoFar.map(e => {
-      const quote = (e.verification?.quote || '').substring(0, 50);
-      return `- "${quote}" | ${e.start_date} | page ${e.verification?.page || '?'}`;
-    }).join('\n');
-
-    return `CONTINUATION INSTRUCTIONS (CRITICAL — READ CAREFULLY):
-
-You are continuing a multi-pass extraction of the same document.
-
-CURSOR — YOUR LAST EXTRACTION:
-The last event you extracted was identified by this text on page ${lastPage}:
-"${lastQuote}"
-
-Continue reading the document FROM THAT POINT FORWARD on page ${lastPage}.
-ONLY extract events that appear AFTER that quote in the document.
-
-The following ${allEventsSoFar.length} events have ALREADY been extracted.
-DO NOT include any of these again:
-${skipList}
-
-If there are no more events to extract, return an empty events array with is_complete: true.`;
-  }
+  // --- Helpers for analysis ---
 
   function deduplicateEvents(events: any[]): any[] {
     // Layer 3: Deterministic server-side dedup
@@ -344,12 +304,12 @@ If there are no more events to extract, return an empty events array with is_com
   }
 
   // ============================================================================
-  // Gemini Analysis — polling-based (POST kicks off a background job, client
-  // polls the status endpoint). The synchronous version held an HTTP connection
-  // open for the full Gemini call (up to several minutes for multi-page PDFs),
-  // which conflicted with platform ingress timeouts (Container Apps' 240s
-  // Envoy default). The polling design returns in <100ms and runs Gemini in
-  // a background async function. Job state persists in the storage backend.
+  // AI Analysis — polling-based (POST kicks off a background job, client polls
+  // the status endpoint). The synchronous version held an HTTP connection open
+  // for the full model call (up to several minutes for multi-page PDFs), which
+  // conflicted with platform ingress timeouts (Container Apps' 240s Envoy
+  // default). The polling design returns in <100ms and runs the model in a
+  // background async function. Job state persists in the storage backend.
   // ============================================================================
 
   async function runAnalyzeJob(jobId: string, apiKey: string, filePart: any): Promise<void> {
@@ -378,69 +338,73 @@ If there are no more events to extract, return an empty events array with is_com
     };
 
     try {
-      const ai = new GoogleGenAI({ apiKey });
-      const model = ENV_VARS.GEMINI_MODEL;
+      const anthropic = new Anthropic({ apiKey });
+      await updateProgress(0, 1);
 
-      const config: any = {
-        systemInstruction: systemPrompt,
-        responseMimeType: "application/json",
-        responseSchema: responseSchema,
-        temperature: ENV_VARS.GEMINI_TEMPERATURE,
-        maxOutputTokens: ENV_VARS.GEMINI_MAX_OUTPUT_TOKENS,
-      };
+      const response = await anthropic.messages.create({
+        model: ENV_VARS.MODEL_NAME,
+        max_tokens: ENV_VARS.MODEL_MAX_OUTPUT_TOKENS,
+        system: [
+          {
+            type: "text",
+            text: systemPrompt,
+            cache_control: { type: "ephemeral" },
+          },
+        ],
+        tools: [
+          {
+            name: "submit_extracted_events",
+            description: "Submit the structured list of extracted events from the legal document.",
+            input_schema: responseSchema as any,
+          },
+        ],
+        tool_choice: { type: "tool", name: "submit_extracted_events" },
+        output_config: { effort: ENV_VARS.MODEL_EFFORT_ANALYZE },
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: {
+                  type: "base64",
+                  media_type: "application/pdf",
+                  data: filePart.inlineData.data,
+                },
+              },
+            ],
+          },
+        ],
+      } as any);
 
-      if ((ENV_VARS as any).GEMINI_THINKING_LEVEL) {
-        config.thinkingConfig = { thinkingLevel: (ENV_VARS as any).GEMINI_THINKING_LEVEL };
+      log(`usage: input=${response.usage.input_tokens}, output=${response.usage.output_tokens}, cache_read=${response.usage.cache_read_input_tokens || 0}, cache_creation=${response.usage.cache_creation_input_tokens || 0}, stop_reason=${response.stop_reason}`);
+
+      if (response.stop_reason === "refusal") {
+        await fail("Model refused to extract from this document. This may happen with sensitive or restricted content.");
+        return;
       }
 
-      let allEvents: any[] = [];
-      let caseType: string | null = null;
-      let isComplete = false;
-      let pass = 0;
+      const toolUseBlock = response.content.find((b: any) => b.type === "tool_use") as any;
+      if (!toolUseBlock) {
+        await fail("Model did not return a tool_use block. No events extracted.");
+        return;
+      }
+      const data = toolUseBlock.input as { case_type: string; events: any[]; is_complete: boolean };
 
-      while (!isComplete && pass < ENV_VARS.GEMINI_MAX_CONTINUATION_PASSES) {
-        pass++;
-        await updateProgress(pass - 1, ENV_VARS.GEMINI_MAX_CONTINUATION_PASSES);
-
-        const parts: any[] = [filePart];
-        if (pass > 1) {
-          parts.push({ text: buildContinuationPrompt(allEvents) });
-        }
-
-        const result = await ai.models.generateContent({
-          model,
-          contents: { parts },
-          config,
-        });
-
-        const data = parseGeminiResponse(result.text || "");
-
-        const newEvents = data.events || [];
-        allEvents.push(...newEvents);
-        caseType = caseType || data.case_type;
-
-        const finishReason = result.candidates?.[0]?.finishReason;
-        const wasTruncated = finishReason === "MAX_TOKENS";
-        const modelSaysIncomplete = data.is_complete === false && newEvents.length > 0;
-        const noNewEvents = pass > 1 && newEvents.length === 0;
-
-        if (noNewEvents) {
-          isComplete = true;
-        } else if (wasTruncated || modelSaysIncomplete) {
-          isComplete = false;
-        } else {
-          isComplete = true;
-        }
-
-        log(`Pass ${pass}: ${newEvents.length} events, finishReason=${finishReason}, is_complete=${data.is_complete}, continuing=${!isComplete}`);
+      if (response.stop_reason === "max_tokens") {
+        log(`WARNING: extraction truncated at max_tokens (${ENV_VARS.MODEL_MAX_OUTPUT_TOKENS}). Events may be incomplete.`);
+      }
+      if (data.is_complete === false) {
+        log(`WARNING: model reported is_complete=false. Events may be incomplete.`);
       }
 
+      const allEvents = data.events || [];
       const dedupedEvents = deduplicateEvents(allEvents);
       const dupsRemoved = allEvents.length - dedupedEvents.length;
-      log(`Complete: ${pass} pass(es), ${allEvents.length} raw → ${dedupedEvents.length} deduped events` + (dupsRemoved > 0 ? ` (${dupsRemoved} duplicates removed)` : ''));
+      log(`Complete: ${allEvents.length} raw → ${dedupedEvents.length} deduped events` + (dupsRemoved > 0 ? ` (${dupsRemoved} duplicates removed)` : ''));
 
-      job.result = { case_type: caseType, events: dedupedEvents };
-      job.progress = { current: pass, total: pass };
+      job.result = { case_type: data.case_type, events: dedupedEvents };
+      job.progress = { current: 1, total: 1 };
       job.status = 'complete';
       job.updatedAt = Date.now();
       await persist();
@@ -471,40 +435,40 @@ If there are no more events to extract, return an empty events array with is_com
     };
 
     try {
-      const ai = new GoogleGenAI({ apiKey });
-      const model = ENV_VARS.GEMINI_MODEL;
+      const anthropic = new Anthropic({ apiKey });
 
       const prompt = getEventMatchingPrompt(sopListForAI);
       const userContent = `Here are the extracted events to classify: ${JSON.stringify(extractedForAI)}`;
 
-      const config: any = {
-        systemInstruction: prompt,
-        responseMimeType: "application/json",
-        responseSchema: eventMatchingResponseSchema,
-        temperature: ENV_VARS.GEMINI_TEMPERATURE,
-        maxOutputTokens: 4096,
-      };
+      const response = await anthropic.messages.create({
+        model: ENV_VARS.MODEL_NAME,
+        max_tokens: 4096,
+        system: prompt,
+        tools: [
+          {
+            name: "submit_event_matches",
+            description: "Submit the array of event-to-SOP match results.",
+            input_schema: eventMatchingResponseSchema as any,
+          },
+        ],
+        tool_choice: { type: "tool", name: "submit_event_matches" },
+        output_config: { effort: "medium" },
+        messages: [{ role: "user", content: userContent }],
+      } as any);
 
-      if ((ENV_VARS as any).GEMINI_THINKING_LEVEL) {
-        config.thinkingConfig = { thinkingLevel: (ENV_VARS as any).GEMINI_THINKING_LEVEL };
+      log(`usage: input=${response.usage.input_tokens}, output=${response.usage.output_tokens}, stop_reason=${response.stop_reason}`);
+
+      if (response.stop_reason === "refusal") {
+        await fail("Model refused to perform event matching.");
+        return;
       }
 
-      const response = await ai.models.generateContent({
-        model,
-        contents: userContent,
-        config,
-      });
-
-      let text = response.text || "";
-      text = text.trim();
-      if (text.startsWith("```json")) {
-        text = text.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-      } else if (text.startsWith("```")) {
-        text = text.replace(/^```\s*/, "").replace(/\s*```$/, "");
+      const toolUseBlock = response.content.find((b: any) => b.type === "tool_use") as any;
+      if (!toolUseBlock) {
+        await fail("Model did not return a tool_use block. No matches produced.");
+        return;
       }
-
-      const repairedText = jsonrepair(text);
-      const resultData = JSON.parse(repairedText);
+      const resultData = toolUseBlock.input as { matches: any[] };
 
       log(`complete: ${(resultData.matches || []).length} matches`);
       job.result = { matches: resultData.matches || [] };
@@ -523,7 +487,7 @@ If there are no more events to extract, return an empty events array with is_com
     if (!storage) return res.status(503).json({ error: "No storage backend configured." });
 
     const apiKey = process.env.API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "Gemini API Key is missing on server." });
+    if (!apiKey) return res.status(500).json({ error: "API Key is missing on server." });
 
     const { filePart } = req.body;
     if (!filePart) return res.status(400).json({ error: "Missing file data for analysis." });
@@ -532,7 +496,7 @@ If there are no more events to extract, return an empty events array with is_com
     const job: AnalyzeJob = {
       id: jobId,
       status: 'running',
-      progress: { current: 0, total: ENV_VARS.GEMINI_MAX_CONTINUATION_PASSES },
+      progress: { current: 0, total: 1 },
       errors: [],
       createdAt: Date.now(),
       updatedAt: Date.now(),
@@ -585,7 +549,7 @@ If there are no more events to extract, return an empty events array with is_com
     if (!storage) return res.status(503).json({ error: "No storage backend configured." });
 
     const apiKey = process.env.API_KEY;
-    if (!apiKey) return res.status(500).json({ error: "Gemini API Key is missing on server." });
+    if (!apiKey) return res.status(500).json({ error: "API Key is missing on server." });
 
     const { extractedForAI, sopListForAI } = req.body;
 
@@ -644,27 +608,26 @@ If there are no more events to extract, return an empty events array with is_com
   app.post("/api/gemini/process-dynamic-descriptions", async (req, res) => {
     const apiKey = process.env.API_KEY;
     if (!apiKey) {
-      return res.status(500).json({ error: "Gemini API Key is missing on server." });
+      return res.status(500).json({ error: "API Key is missing on server." });
     }
 
     try {
       const { filePart, queue } = req.body;
-      
-      const ai = new GoogleGenAI({ apiKey });
-      const model = ENV_VARS.GEMINI_MODEL;
 
-      const systemInstruction = "You are a Legal Assistant. Read the document. For each Event ID and Template provided, fill in the placeholders indicated by {prompt} with specific details found in the document. Return the full description with the placeholders replaced by the extracted information. If information for a placeholder is not found, replace it with 'Information not found'. Keep the text outside the curly braces exactly as it is in the template.";
-      
-      const responseSchema = {
-        type: Type.OBJECT,
+      const anthropic = new Anthropic({ apiKey });
+
+      const systemInstruction = "You are a Legal Assistant. Read the document. For each Event ID and Template provided, fill in the placeholders indicated by {prompt} with specific details found in the document. Return the full description with the placeholders replaced by the extracted information. If information for a placeholder is not found, replace it with 'Information not found'. Keep the text outside the curly braces exactly as it is in the template. Use the `submit_descriptions` tool to return your output.";
+
+      const descriptionsSchema = {
+        type: "object",
         properties: {
           results: {
-            type: Type.ARRAY,
+            type: "array",
             items: {
-              type: Type.OBJECT,
+              type: "object",
               properties: {
-                eventId: { type: Type.STRING },
-                description: { type: Type.STRING }
+                eventId: { type: "string" },
+                description: { type: "string" }
               },
               required: ["eventId", "description"]
             }
@@ -675,38 +638,46 @@ If there are no more events to extract, return an empty events array with is_com
 
       const userPrompt = `Templates for events:\n${JSON.stringify(queue)}`;
 
-      const config: any = {
-        systemInstruction,
-        responseMimeType: "application/json",
-        responseSchema,
-        temperature: 0.1, 
-        maxOutputTokens: 4096,
-      };
+      const response = await anthropic.messages.create({
+        model: ENV_VARS.MODEL_NAME,
+        max_tokens: 4096,
+        system: systemInstruction,
+        tools: [
+          {
+            name: "submit_descriptions",
+            description: "Submit the filled-in descriptions for each event template.",
+            input_schema: descriptionsSchema as any,
+          },
+        ],
+        tool_choice: { type: "tool", name: "submit_descriptions" },
+        output_config: { effort: "low" },
+        messages: [
+          {
+            role: "user",
+            content: [
+              {
+                type: "document",
+                source: {
+                  type: "base64",
+                  media_type: "application/pdf",
+                  data: filePart.inlineData.data,
+                },
+              },
+              { type: "text", text: userPrompt },
+            ],
+          },
+        ],
+      } as any);
 
-      if ((ENV_VARS as any).GEMINI_THINKING_LEVEL) {
-        config.thinkingConfig = { thinkingLevel: (ENV_VARS as any).GEMINI_THINKING_LEVEL };
+      const toolUseBlock = response.content.find((b: any) => b.type === "tool_use") as any;
+      if (!toolUseBlock) {
+        return res.status(500).json({ error: "Model did not return a tool_use block." });
       }
+      const resultData = toolUseBlock.input as { results: any[] };
 
-      const response = await ai.models.generateContent({
-        model,
-        contents: { parts: [filePart, { text: userPrompt }] },
-        config,
-      });
-
-      let text = response.text || "";
-      text = text.trim();
-      if (text.startsWith("```json")) {
-        text = text.replace(/^```json\s*/, "").replace(/\s*```$/, "");
-      } else if (text.startsWith("```")) {
-        text = text.replace(/^```\s*/, "").replace(/\s*```$/, "");
-      }
-
-      const repairedText = jsonrepair(text);
-      const resultData = JSON.parse(repairedText);
-      
       res.json(resultData.results);
     } catch (error: any) {
-      console.error("Gemini Dynamic Descriptions Error:", error);
+      console.error("Dynamic Descriptions Error:", error);
       res.status(500).json({ error: error.message });
     }
   });

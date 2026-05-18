@@ -1,10 +1,7 @@
 
-// New System
-import { ThinkingLevel } from "@google/genai";
-
 /**
  * This file serves as a central hub for application configuration.
- * Except for the Gemini API_KEY (which is sensitive and managed by the environment), 
+ * Except for the API_KEY (which is sensitive and managed by the environment),
  * all configuration variables are defined here.
  */
 
@@ -16,13 +13,14 @@ export const ENV_VARS = {
   CASE_TYPES: CASE_TYPES,
   DEFAULT_CASE_TYPE: "Personal Injury" as CaseType,
 
-  // Gemini API Configuration
-  GEMINI_MODEL: 'gemini-3-flash-preview',
-  GEMINI_THINKING_LEVEL: ThinkingLevel.MEDIUM,
-  GEMINI_TEMPERATURE: 0.1,
-  GEMINI_MAX_OUTPUT_TOKENS: 65536,
-  GEMINI_MAX_CONTINUATION_PASSES: 10,
-  
+  // Model Configuration (Anthropic Claude)
+  MODEL_NAME: 'claude-opus-4-7',
+  MODEL_MAX_OUTPUT_TOKENS: 16384,
+  // Effort for the analyze step. Tunable: 'low' | 'medium' | 'high' | 'xhigh' | 'max'.
+  // Start at medium for latency-sensitive UX; raise to high if extraction quality is insufficient.
+  // apply-reminders and process-dynamic-descriptions effort is hardcoded at the call sites in server.ts.
+  MODEL_EFFORT_ANALYZE: 'medium',
+
   // Prompt Configuration
   NAMING_CONVENTION: "Use professional legal terminology and common sense to create concise, accurate titles for the events.",
   CASE_CLASSIFICATION_PROMPT: `Analyze the legal document to classify it as one of the following: ${CASE_TYPES.join(', ')}. Return the final classification exactly as one of those strings.`,
