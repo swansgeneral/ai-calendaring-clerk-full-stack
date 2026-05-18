@@ -4,6 +4,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
+import { CosmosClient, Container } from "@azure/cosmos";
 import admin from "firebase-admin";
 import { DateTime } from "luxon";
 import { GoogleGenAI, Type } from "@google/genai";
@@ -15,28 +16,189 @@ const PORT = Number(process.env.PORT) || 3000;
 console.log(`Initializing server on port ${PORT}...`);
 console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
-// Initialize Firebase Admin
-let db: admin.firestore.Firestore | null = null;
-try {
-  if (process.env.FIREBASE_PRIVATE_KEY) {
-    const serviceAccountJson = JSON.parse(process.env.FIREBASE_PRIVATE_KEY);
-    const credential = admin.credential.cert(serviceAccountJson);
-    
-    admin.initializeApp({ credential });
-    db = admin.firestore();
-    console.log("✅ Firebase Admin initialized successfully.");
-  } else {
-    console.warn("⚠️ Firebase credentials missing. Database will not be initialized.");
-  }
-} catch (error) {
-  console.error("❌ Failed to initialize Firebase Admin:", error);
+// ============================================================================
+// Storage abstraction — dual-cloud (Cosmos DB on Azure, Firestore on GCP).
+// Selected at startup based on which credentials are present in env.
+//   - COSMOS_ENDPOINT + COSMOS_KEY  →  Azure Cosmos DB
+//   - FIREBASE_PRIVATE_KEY          →  Firebase Firestore
+//   - both set                      →  Cosmos wins, warning logged
+//   - neither set                   →  SOP and export endpoints return 503
+// ============================================================================
+
+const COSMOS_DATABASE = process.env.COSMOS_DATABASE || "calendaring_clerk";
+const COSMOS_CONTAINER_NAME = process.env.COSMOS_CONTAINER || "sop_data";
+const COSMOS_SOP_DOC_ID = process.env.COSMOS_SOP_DOC_ID || "main_document";
+const FIRESTORE_COLLECTION = "sop_data";
+const FIRESTORE_SOP_DOC_ID = "main_document";
+
+type SopDocument = { Reminders: any[]; "Calendar Events": any[]; [key: string]: any };
+
+interface ExportJob {
+  id: string;
+  status: 'running' | 'complete' | 'error';
+  progress: { current: number; total: number };
+  summary: { entriesCreated: number; remindersSent: number };
+  errors: string[];
+  errorMessage?: string;
+  createdAt: number;
+  updatedAt: number;
 }
 
-const FIRESTORE_COLLECTION = "sop_data";
-const FIRESTORE_DOC_ID = "main_document";
+interface SopStorage {
+  get(): Promise<SopDocument | null>;
+  put(data: SopDocument): Promise<void>;
+}
+
+interface JobStore {
+  get(jobId: string): Promise<ExportJob | null>;
+  put(job: ExportJob): Promise<void>;
+  cleanupExpired(maxAgeMs: number): Promise<void>;
+}
+
+class CosmosSopStorage implements SopStorage {
+  constructor(private container: Container) {}
+  async get(): Promise<SopDocument | null> {
+    try {
+      const { resource } = await this.container.item(COSMOS_SOP_DOC_ID, COSMOS_SOP_DOC_ID).read();
+      if (!resource) return null;
+      const { id, _rid, _self, _etag, _attachments, _ts, ...data } = resource;
+      return data as SopDocument;
+    } catch (err: any) {
+      if (err.code === 404) return null;
+      throw err;
+    }
+  }
+  async put(data: SopDocument): Promise<void> {
+    await this.container.items.upsert({ id: COSMOS_SOP_DOC_ID, ...data });
+  }
+}
+
+class CosmosJobStore implements JobStore {
+  constructor(private container: Container) {}
+  async get(jobId: string): Promise<ExportJob | null> {
+    try {
+      const { resource } = await this.container.item(jobId, jobId).read();
+      if (!resource) return null;
+      const { _rid, _self, _etag, _attachments, _ts, ...job } = resource;
+      return job as ExportJob;
+    } catch (err: any) {
+      if (err.code === 404) return null;
+      throw err;
+    }
+  }
+  async put(job: ExportJob): Promise<void> {
+    await this.container.items.upsert({ ...job });
+  }
+  async cleanupExpired(maxAgeMs: number): Promise<void> {
+    const cutoff = Date.now() - maxAgeMs;
+    try {
+      const { resources } = await this.container.items
+        .query({
+          query: "SELECT c.id FROM c WHERE STARTSWITH(c.id, 'job_') AND c.updatedAt < @cutoff",
+          parameters: [{ name: "@cutoff", value: cutoff }],
+        })
+        .fetchAll();
+      for (const { id } of resources) {
+        await this.container.item(id, id).delete().catch(() => { /* ignore deletion races */ });
+      }
+    } catch (err) {
+      console.warn("CosmosJobStore.cleanupExpired error:", err);
+    }
+  }
+}
+
+class FirestoreSopStorage implements SopStorage {
+  constructor(private db: admin.firestore.Firestore) {}
+  async get(): Promise<SopDocument | null> {
+    const doc = await this.db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_SOP_DOC_ID).get();
+    if (!doc.exists) return null;
+    return doc.data() as SopDocument;
+  }
+  async put(data: SopDocument): Promise<void> {
+    await this.db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_SOP_DOC_ID).set(data);
+  }
+}
+
+class FirestoreJobStore implements JobStore {
+  constructor(private db: admin.firestore.Firestore) {}
+  async get(jobId: string): Promise<ExportJob | null> {
+    const doc = await this.db.collection(FIRESTORE_COLLECTION).doc(jobId).get();
+    if (!doc.exists) return null;
+    return doc.data() as ExportJob;
+  }
+  async put(job: ExportJob): Promise<void> {
+    await this.db.collection(FIRESTORE_COLLECTION).doc(job.id).set(job);
+  }
+  async cleanupExpired(maxAgeMs: number): Promise<void> {
+    const cutoff = Date.now() - maxAgeMs;
+    try {
+      const snap = await this.db.collection(FIRESTORE_COLLECTION)
+        .where("updatedAt", "<", cutoff)
+        .get();
+      const batch = this.db.batch();
+      let deletions = 0;
+      snap.docs.forEach(d => {
+        if (d.id.startsWith("job_")) {
+          batch.delete(d.ref);
+          deletions++;
+        }
+      });
+      if (deletions > 0) await batch.commit();
+    } catch (err) {
+      console.warn("FirestoreJobStore.cleanupExpired error:", err);
+    }
+  }
+}
+
+function selectStorage(): { sop: SopStorage; jobs: JobStore } | null {
+  const hasCosmos = !!(process.env.COSMOS_ENDPOINT && process.env.COSMOS_KEY);
+  const hasFirestore = !!process.env.FIREBASE_PRIVATE_KEY;
+
+  if (hasCosmos && hasFirestore) {
+    console.warn("⚠️ Both COSMOS_* and FIREBASE_PRIVATE_KEY credentials present. Using Cosmos DB.");
+  }
+
+  if (hasCosmos) {
+    try {
+      const client = new CosmosClient({
+        endpoint: process.env.COSMOS_ENDPOINT!,
+        key: process.env.COSMOS_KEY!,
+      });
+      const container = client.database(COSMOS_DATABASE).container(COSMOS_CONTAINER_NAME);
+      console.log("✅ Storage backend: Azure Cosmos DB");
+      return { sop: new CosmosSopStorage(container), jobs: new CosmosJobStore(container) };
+    } catch (err) {
+      console.error("❌ Failed to initialize Cosmos DB:", err);
+      return null;
+    }
+  }
+
+  if (hasFirestore) {
+    try {
+      const serviceAccount = JSON.parse(process.env.FIREBASE_PRIVATE_KEY!);
+      admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+      const db = admin.firestore();
+      console.log("✅ Storage backend: Firebase Firestore");
+      return { sop: new FirestoreSopStorage(db), jobs: new FirestoreJobStore(db) };
+    } catch (err) {
+      console.error("❌ Failed to initialize Firestore:", err);
+      return null;
+    }
+  }
+
+  console.warn("⚠️ No storage backend configured. SOP and export endpoints will return 503.");
+  return null;
+}
+
+const storage = selectStorage();
 
 async function startServer() {
   const app = express();
+  // Trust the platform ingress so req.protocol / req.secure reflect the original
+  // HTTPS request. Both Cloud Run and Container Apps terminate HTTPS at ingress
+  // and forward HTTP to the container — without this, anything that inspects
+  // req.secure would think the connection is plain HTTP.
+  app.set('trust proxy', 1);
   const server = createServer(app);
   
   // Initialize WebSocket Server
@@ -375,23 +537,15 @@ If there are no more events to extract, return an empty events array with is_com
   });
 
   app.get("/api/sop-data", async (req, res) => {
+    if (!storage) {
+      return res.status(503).json({ error: "No storage backend configured. Set COSMOS_* or FIREBASE_PRIVATE_KEY env vars." });
+    }
     try {
-      if (db) {
-        // Fetch from Firestore
-        const docRef = db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC_ID);
-        const doc = await docRef.get();
-        if (doc.exists) {
-          res.json([doc.data()]); // Wrap in array to match expected structure
-        } else {
-          // If document doesn't exist in Firestore, return empty structure
-          console.log("Firestore document not found, returning empty default.");
-          res.json([{
-            "Reminders": [],
-            "Calendar Events": []
-          }]);
-        }
+      const data = await storage.sop.get();
+      if (data) {
+        res.json([data]);
       } else {
-        res.status(500).json({ error: "Database not initialized" });
+        res.json([{ "Reminders": [], "Calendar Events": [] }]);
       }
     } catch (error) {
       console.error("Error reading SOP data:", error);
@@ -400,21 +554,14 @@ If there are no more events to extract, return an empty events array with is_com
   });
 
   app.post("/api/sop-data", async (req, res) => {
+    if (!storage) {
+      return res.status(503).json({ error: "No storage backend configured." });
+    }
     try {
-      if (!db) {
-        return res.status(500).json({ error: "Database not initialized" });
-      }
-      
       const newData = req.body;
       const dataToSave = Array.isArray(newData) ? newData[0] : newData;
-
-      // Save to Firestore
-      const docRef = db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_DOC_ID);
-      await docRef.set(dataToSave);
-      
-      // Broadcast update to all connected clients
+      await storage.sop.put(dataToSave);
       broadcast({ type: 'SOP_UPDATE', data: newData });
-      
       res.json({ success: true });
     } catch (error) {
       console.error("Error writing SOP data:", error);
@@ -678,118 +825,152 @@ If there are no more events to extract, return an empty events array with is_com
 
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-  app.post("/api/clio/export-direct", async (req, res) => {
-    const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = req.body;
+  // ============================================================================
+  // Polling-based Clio export
+  //
+  // The original SSE design works on Cloud Run but breaks on Azure Container
+  // Apps because the platform Authentication middleware buffers/closes
+  // streaming responses. POST creates an in-memory job and returns its id;
+  // the client polls GET /api/clio/export-status/:jobId for progress until
+  // status is 'complete' or 'error'. Plain JSON, no streaming, portable.
+  // ============================================================================
 
-    if (!matterDisplayNumber) {
-      return res.status(400).json({ error: "Matter Display Number is required" });
+  // ExportJob type is defined at module scope alongside the storage abstraction.
+  // Job state persists in the configured storage backend (Cosmos or Firestore)
+  // so polling works correctly regardless of replica count / session affinity.
+  const EXPORT_JOB_TTL_MS = 60 * 60 * 1000;
+
+  if (storage) {
+    setInterval(() => {
+      storage.jobs.cleanupExpired(EXPORT_JOB_TTL_MS).catch(err => {
+        console.warn("Job store cleanup failed:", err);
+      });
+    }, 5 * 60 * 1000).unref?.();
+  }
+
+  const generateJobId = () => "job_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+  // Bare authenticated fetch to Clio — no req/res coupling. Use this inside
+  // background jobs where we have an access token but no live response object.
+  const clioFetch = (accessToken: string, endpoint: string, options: any = {}) =>
+    fetch(endpoint, {
+      ...options,
+      headers: { ...options.headers, Authorization: `Bearer ${accessToken}` },
+    });
+
+  async function runExportJob(
+    jobId: string,
+    accessToken: string,
+    params: {
+      matterDisplayNumber: string;
+      events: any[];
+      involvedAttorneys: any[];
+      involvedStaff: any[];
+      timezone?: string;
     }
+  ): Promise<void> {
+    if (!storage) return;
+    const job = await storage.jobs.get(jobId);
+    if (!job) return;
 
-    // Set SSE headers — from this point all responses are streamed frames
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache');
-    res.setHeader('Connection', 'keep-alive');
-    res.flushHeaders();
+    const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = params;
 
-    const sendEvent = (data: object) => {
-      res.write(`data: ${JSON.stringify(data)}\n\n`);
+    const log = (msg: string, extra?: object) => {
+      const line = `[export jobId=${jobId}] ${msg}` + (extra ? ` ${JSON.stringify(extra)}` : '');
+      process.stdout.write(line + '\n');
+    };
+    const persist = async () => {
+      try { await storage!.jobs.put(job); }
+      catch (err: any) { process.stderr.write(`[export jobId=${jobId}] persist failed: ${err?.message || err}\n`); }
+    };
+    const updateProgress = async (current: number) => {
+      job.progress.current = current;
+      job.updatedAt = Date.now();
+      await persist();
+    };
+    const fail = async (message: string) => {
+      log('FAIL', { message });
+      job.status = 'error';
+      job.errorMessage = message;
+      job.updatedAt = Date.now();
+      await persist();
     };
 
-    let clientDisconnected = false;
-    req.on('close', () => { clientDisconnected = true; });
-
-    // Calculate total operations for progress: 2 setup + 1 per event + 1 per reminder
-    const totalOps = 2 + (events?.length || 0) + (events || []).reduce((sum: number, evt: any) => {
-      return sum + (evt.reminders?.length || 0);
-    }, 0);
     let currentOp = 0;
+
+    const ensureSeconds = (t: string) => {
+      if (!t) return "00:00:00";
+      return t.split(':').length === 2 ? `${t}:00` : t;
+    };
+    const adjustForWeekend = (date: DateTime) => {
+      let d = date;
+      const day = d.weekday;
+      if (day === 7) d = d.minus({ days: 2 });
+      else if (day === 6) d = d.minus({ days: 1 });
+      return d;
+    };
+    const calculateReminderDate = (baseDateStr: string, quantity: number, unit: string, isAllDay: boolean, timeStr?: string, tz?: string) => {
+      let date: DateTime;
+      const zone = tz || "UTC";
+      if (isAllDay) {
+        date = DateTime.fromISO(`${baseDateStr}T00:00:00`, { zone });
+      } else {
+        date = DateTime.fromISO(`${baseDateStr}T${ensureSeconds(timeStr || '00:00:00')}`, { zone });
+      }
+      if (unit === 'minutes') date = date.minus({ minutes: quantity });
+      else if (unit === 'hours') date = date.minus({ hours: quantity });
+      else if (unit === 'days') date = date.minus({ days: quantity });
+      else if (unit === 'weeks') date = date.minus({ weeks: quantity });
+      return adjustForWeekend(date);
+    };
 
     try {
       // 1. Resolve Matter
-      if (clientDisconnected) return res.end();
-      sendEvent({ type: 'progress', current: currentOp, total: totalOps });
+      log('looking up matter', { matterDisplayNumber });
+      const matterResponse = await clioFetch(accessToken, `https://app.clio.com/api/v4/matters.json?query=${encodeURIComponent(matterDisplayNumber)}&fields=id,display_number,client{id,last_name}`);
 
-      const matterResponse = await callClioApi(req, res, `https://app.clio.com/api/v4/matters.json?query=${encodeURIComponent(matterDisplayNumber)}&fields=id,display_number,client{id,last_name}`);
-      if (!matterResponse) {
-        sendEvent({ type: 'error', message: 'Not authenticated with Clio.' });
-        return res.end();
+      if (matterResponse.status === 401) {
+        return fail("Clio authentication expired. Please reconnect Clio and try again.");
       }
-
       if (!matterResponse.ok) {
-        sendEvent({ type: 'error', message: 'Failed to fetch matter from Clio.' });
-        return res.end();
+        const errText = await matterResponse.text().catch(() => '');
+        return fail(`Failed to fetch matter from Clio (status ${matterResponse.status}). ${errText.slice(0, 200)}`);
       }
 
       const mattersData = await matterResponse.json();
-      const matter = mattersData.data.find((m: any) => m.display_number === matterDisplayNumber);
-
+      const matter = mattersData.data?.find((m: any) => m.display_number === matterDisplayNumber);
       if (!matter) {
-        sendEvent({ type: 'error', message: `Matter "${matterDisplayNumber}" not found in Clio.` });
-        return res.end();
+        return fail(`Matter "${matterDisplayNumber}" not found in Clio.`);
       }
+      log('matter resolved', { id: matter.id });
 
       const clientLastName = matter.client?.last_name || "Client";
       const clientId = matter.client?.id;
 
-      // 2. Fetch All Clio Users for resolution (including notification methods)
+      // 2. Fetch Users
       currentOp++;
-      if (clientDisconnected) return res.end();
-      sendEvent({ type: 'progress', current: currentOp, total: totalOps });
+      await updateProgress(currentOp);
 
-      const usersResponse = await callClioApi(req, res, "https://app.clio.com/api/v4/users.json?fields=id,name,subscription_type,default_calendar_id,notification_methods");
-      if (!usersResponse) {
-        sendEvent({ type: 'error', message: 'Not authenticated with Clio.' });
-        return res.end();
+      const usersResponse = await clioFetch(accessToken, "https://app.clio.com/api/v4/users.json?fields=id,name,subscription_type,default_calendar_id,notification_methods");
+      if (usersResponse.status === 401) {
+        return fail("Clio authentication expired during users lookup.");
       }
-
+      if (!usersResponse.ok) {
+        const errText = await usersResponse.text().catch(() => '');
+        return fail(`Failed to fetch users (status ${usersResponse.status}). ${errText.slice(0, 200)}`);
+      }
       const usersData = await usersResponse.json();
-      const allUsers = usersData.data;
+      const allUsers = usersData.data || [];
 
-      let entriesCreated = 0;
-      let remindersSent = 0;
-      const errors: string[] = [];
-
-      const ensureSeconds = (t: string) => {
-        if (!t) return "00:00:00";
-        return t.split(':').length === 2 ? `${t}:00` : t;
-      };
-
-      const adjustForWeekend = (date: DateTime) => {
-        let d = date;
-        const day = d.weekday; // 1 = Monday, 7 = Sunday in Luxon
-        if (day === 7) d = d.minus({ days: 2 }); // Sunday -> Friday
-        else if (day === 6) d = d.minus({ days: 1 }); // Saturday -> Friday
-        return d;
-      };
-
-      const calculateReminderDate = (baseDateStr: string, quantity: number, unit: string, isAllDay: boolean, timeStr?: string, tz?: string) => {
-        let date: DateTime;
-        const zone = tz || "UTC";
-
-        if (isAllDay) {
-          date = DateTime.fromISO(`${baseDateStr}T00:00:00`, { zone });
-        } else {
-          date = DateTime.fromISO(`${baseDateStr}T${ensureSeconds(timeStr || '00:00:00')}`, { zone });
-        }
-
-        if (unit === 'minutes') date = date.minus({ minutes: quantity });
-        else if (unit === 'hours') date = date.minus({ hours: quantity });
-        else if (unit === 'days') date = date.minus({ days: quantity });
-        else if (unit === 'weeks') date = date.minus({ weeks: quantity });
-
-        return adjustForWeekend(date);
-      };
-
-      // 3. Iterate through events
-      for (const event of events) {
+      // 3. Iterate events
+      log('processing events', { count: events.length });
+      for (const [eventIdx, event] of events.entries()) {
         currentOp++;
-        if (clientDisconnected) return res.end();
-        sendEvent({ type: 'progress', current: currentOp, total: totalOps });
+        await updateProgress(currentOp);
+        log('processing event', { eventIdx, title: event.title });
 
         try {
-          // Resolve Attendees
           const attendeeIds = new Set<number>();
-
           if (event.inviteAllAttorneys && involvedAttorneys) {
             involvedAttorneys.forEach((u: any) => attendeeIds.add(u.calendar_id));
           }
@@ -799,12 +980,9 @@ If there are no more events to extract, return an empty events array with is_com
           if (event["Firm Invitees"]) {
             event["Firm Invitees"].forEach((i: any) => attendeeIds.add(i.calendar_id));
           }
-
           const attendees = Array.from(attendeeIds).map(id => ({ id: Number(id), type: "Calendar", _destroy: false }));
 
-          // Create Primary Calendar Entry
           const eventTitle = `${clientLastName}: ${event.title}`;
-
           let startAt: string;
           let endAt: string;
 
@@ -820,10 +998,8 @@ If there are no more events to extract, return an empty events array with is_com
 
           const calendarOwnerId = Number(event["Calendar Owner"]);
           const matterId = Number(matter.id);
-
           if (isNaN(calendarOwnerId) || isNaN(matterId)) {
-            console.error(`Invalid IDs — calendarOwner: ${event["Calendar Owner"]}, matter: ${matter.id}`);
-            errors.push(`Failed to create event "${event.title}": Invalid calendar owner or matter ID`);
+            job.errors.push(`Failed to create event "${event.title}": Invalid calendar owner or matter ID`);
             continue;
           }
 
@@ -842,54 +1018,46 @@ If there are no more events to extract, return an empty events array with is_com
             }
           };
 
-          console.log(`Creating event: ${eventTitle}`);
-
-          const createEventResponse = await callClioApi(req, res, "https://app.clio.com/api/v4/calendar_entries.json", {
+          const createEventResponse = await clioFetch(accessToken, "https://app.clio.com/api/v4/calendar_entries.json", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(calendarEntryPayload)
           });
 
-          if (!createEventResponse || !createEventResponse.ok) {
-            const errText = createEventResponse ? await createEventResponse.text() : "Auth failed";
-            console.error(`Failed to create event "${event.title}":`, errText);
-            errors.push(`Failed to create event "${event.title}": ${errText}`);
+          if (createEventResponse.status === 401) {
+            return fail("Clio authentication expired while creating an event.");
+          }
+          if (!createEventResponse.ok) {
+            const errText = await createEventResponse.text().catch(() => '');
+            job.errors.push(`Failed to create event "${event.title}": ${errText.slice(0, 200)}`);
             continue;
           }
 
           const createdEventData = await createEventResponse.json();
           const clioEventId = createdEventData.data.id;
-          entriesCreated++;
+          job.summary.entriesCreated++;
+          job.updatedAt = Date.now();
 
-          // Invite Client if requested
           if (event["Invite Client"] && clientId) {
             const patchPayload = {
               data: {
-                attendees: [
-                  {
-                    id: clientId,
-                    type: "Contact",
-                    _destroy: false
-                  }
-                ]
+                attendees: [{ id: clientId, type: "Contact", _destroy: false }]
               }
             };
-            await callClioApi(req, res, `https://app.clio.com/api/v4/calendar_entries/${clioEventId}.json`, {
+            await clioFetch(accessToken, `https://app.clio.com/api/v4/calendar_entries/${clioEventId}.json`, {
               method: "PATCH",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(patchPayload)
             });
           }
 
-          // 4. Iterate through reminders
+          // Reminders
           if (event.reminders && event.reminders.length > 0) {
             for (const reminder of event.reminders) {
               currentOp++;
-              if (clientDisconnected) return res.end();
-              sendEvent({ type: 'progress', current: currentOp, total: totalOps });
+              await updateProgress(currentOp);
 
               try {
-                // Resolve Recipients
                 const recipientIds = new Set<number>();
                 if (reminder.remindAllAttorneys && involvedAttorneys) {
                   involvedAttorneys.forEach((u: any) => recipientIds.add(u.calendar_id));
@@ -900,14 +1068,12 @@ If there are no more events to extract, return an empty events array with is_com
                 if (reminder.manualUsers) {
                   reminder.manualUsers.forEach((u: any) => recipientIds.add(u.calendar_id));
                 }
-
                 const recipients = Array.from(recipientIds);
 
                 if (reminder.type === 'Calendar Event') {
                   const reminderTitle = `${clientLastName}: ${reminder.calendarTitle || event.title}`;
                   const reminderDate = calculateReminderDate(event.start_date, reminder.quantity, reminder.unit, event.is_all_day, event.start_time, timezone);
                   const reminderDateStr = reminderDate.toISO() || "";
-
                   const reminderEndDateStr = reminderDate.plus({ days: 1 }).startOf('day').toISO() || "";
 
                   const reminderCalendarPayload = {
@@ -924,18 +1090,18 @@ If there are no more events to extract, return an empty events array with is_com
                     }
                   };
 
-                  const createReminderCalResponse = await callClioApi(req, res, "https://app.clio.com/api/v4/calendar_entries.json", {
+                  const createReminderCalResponse = await clioFetch(accessToken, "https://app.clio.com/api/v4/calendar_entries.json", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(reminderCalendarPayload)
                   });
 
-                  if (createReminderCalResponse && createReminderCalResponse.ok) {
-                    entriesCreated++;
+                  if (createReminderCalResponse.ok) {
+                    job.summary.entriesCreated++;
+                    job.updatedAt = Date.now();
                   } else {
-                    const errText = createReminderCalResponse ? await createReminderCalResponse.text() : "Auth failed";
-                    console.error(`Failed to create calendar reminder for "${event.title}":`, errText);
-                    errors.push(`Failed to create calendar reminder for "${event.title}": ${errText}`);
+                    const errText = await createReminderCalResponse.text().catch(() => '');
+                    job.errors.push(`Failed to create calendar reminder for "${event.title}": ${errText.slice(0, 200)}`);
                   }
                 } else if (reminder.type === 'Email') {
                   for (const recipientCalendarId of recipients) {
@@ -944,11 +1110,11 @@ If there are no more events to extract, return an empty events array with is_com
 
                     const emailMethod = user.notification_methods?.find((m: any) => m.type === 'Email');
                     if (!emailMethod) {
-                      errors.push(`User ${user.name} does not have an Email notification method configured in Clio.`);
+                      job.errors.push(`User ${user.name} does not have an Email notification method configured in Clio.`);
                       continue;
                     }
 
-                    const reminderPayload = {
+                    const reminderPayload: any = {
                       data: {
                         subject: { id: Number(clioEventId), type: "CalendarEntry" },
                         notification_method: { id: Number(emailMethod.id) },
@@ -956,45 +1122,130 @@ If there are no more events to extract, return an empty events array with is_com
                         duration_unit: reminder.unit === 'weeks' ? 'days' : reminder.unit
                       }
                     };
-
                     if (reminder.unit === 'weeks') {
                       reminderPayload.data.duration_value = reminder.quantity * 7;
                       reminderPayload.data.duration_unit = 'days';
                     }
 
-                    const createReminderResponse = await callClioApi(req, res, "https://app.clio.com/api/v4/reminders.json", {
+                    const createReminderResponse = await clioFetch(accessToken, "https://app.clio.com/api/v4/reminders.json", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify(reminderPayload)
                     });
 
-                    if (createReminderResponse && createReminderResponse.ok) {
-                      remindersSent++;
+                    if (createReminderResponse.ok) {
+                      job.summary.remindersSent++;
+                      job.updatedAt = Date.now();
                     } else {
-                      const errText = createReminderResponse ? await createReminderResponse.text() : "Auth failed";
-                      errors.push(`Failed to send email reminder to ${user.name}: ${errText}`);
+                      const errText = await createReminderResponse.text().catch(() => '');
+                      job.errors.push(`Failed to send email reminder to ${user.name}: ${errText.slice(0, 200)}`);
                     }
 
                     await sleep(1000);
                   }
                 }
               } catch (remErr: any) {
-                errors.push(`Error processing reminder for "${event.title}": ${remErr.message}`);
+                job.errors.push(`Error processing reminder for "${event.title}": ${remErr?.message || remErr}`);
               }
             }
           }
         } catch (evtErr: any) {
-          errors.push(`Error processing event "${event.title}": ${evtErr.message}`);
+          job.errors.push(`Error processing event "${event.title}": ${evtErr?.message || evtErr}`);
         }
       }
 
-      sendEvent({ type: 'complete', summary: { entriesCreated, remindersSent }, errors });
-      res.end();
-
+      log('export complete', { entriesCreated: job.summary.entriesCreated, remindersSent: job.summary.remindersSent, errorCount: job.errors.length });
+      job.status = 'complete';
+      job.updatedAt = Date.now();
+      await persist();
     } catch (error: any) {
-      console.error("Direct Export Error:", error);
-      sendEvent({ type: 'error', message: error.message });
-      res.end();
+      process.stderr.write(`[export jobId=${jobId}] UNCAUGHT: ${error?.message || error}\n${error?.stack || ''}\n`);
+      return fail(error?.message || 'Unknown error during export');
+    }
+  }
+
+  app.post("/api/clio/export-direct", async (req, res) => {
+    const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = req.body;
+
+    if (!storage) {
+      return res.status(503).json({ error: "No storage backend configured." });
+    }
+
+    if (!matterDisplayNumber) {
+      return res.status(400).json({ error: "Matter Display Number is required" });
+    }
+
+    const accessToken = req.cookies.clio_access_token;
+    if (!accessToken) {
+      return res.status(401).json({ error: "Not authenticated with Clio. Please reconnect Clio and try again." });
+    }
+
+    const totalOps = 2 + (events?.length || 0) + (events || []).reduce((sum: number, evt: any) => {
+      return sum + (evt.reminders?.length || 0);
+    }, 0);
+
+    const jobId = generateJobId();
+    const job: ExportJob = {
+      id: jobId,
+      status: 'running',
+      progress: { current: 0, total: totalOps },
+      summary: { entriesCreated: 0, remindersSent: 0 },
+      errors: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    try {
+      await storage.jobs.put(job);
+    } catch (err: any) {
+      console.error(`[export jobId=${jobId}] failed to create job:`, err);
+      return res.status(500).json({ error: "Failed to start export job." });
+    }
+
+    console.log(`[export jobId=${jobId}] starting`, JSON.stringify({ matterDisplayNumber, eventCount: events?.length || 0, totalOps }));
+
+    // Fire and forget — client polls /api/clio/export-status/:jobId for progress
+    runExportJob(jobId, accessToken, {
+      matterDisplayNumber,
+      events: events || [],
+      involvedAttorneys: involvedAttorneys || [],
+      involvedStaff: involvedStaff || [],
+      timezone,
+    }).catch(async (err: any) => {
+      process.stderr.write(`[export jobId=${jobId}] runExportJob threw outside try: ${err?.message || err}\n`);
+      try {
+        const j = await storage!.jobs.get(jobId);
+        if (j) {
+          j.status = 'error';
+          j.errorMessage = err?.message || String(err);
+          j.updatedAt = Date.now();
+          await storage!.jobs.put(j);
+        }
+      } catch { /* best effort */ }
+    });
+
+    res.status(202).json({ jobId });
+  });
+
+  app.get("/api/clio/export-status/:jobId", async (req, res) => {
+    if (!storage) {
+      return res.status(503).json({ error: "No storage backend configured." });
+    }
+    try {
+      const job = await storage.jobs.get(req.params.jobId);
+      if (!job) {
+        return res.status(404).json({ error: "Job not found or has expired" });
+      }
+      res.json({
+        status: job.status,
+        progress: job.progress,
+        summary: job.summary,
+        errors: job.errors,
+        errorMessage: job.errorMessage,
+      });
+    } catch (err: any) {
+      console.error("Error reading export job:", err);
+      res.status(500).json({ error: "Failed to read job status" });
     }
   });
 
