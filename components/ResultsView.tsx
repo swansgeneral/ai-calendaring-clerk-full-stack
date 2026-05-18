@@ -675,66 +675,66 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
 
       setExportProgress(0);
 
-      const response = await fetch('/api/clio/export-direct', {
+      // Step 1: kick off the export job. Server returns 202 + { jobId } immediately.
+      const startResponse = await fetch('/api/clio/export-direct', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(payload)
       });
 
-      // A non-OK status here means SSE headers were never sent (e.g. 400 missing matter number)
-      if (!response.ok || !response.body) {
-        const errorText = await response.text();
-        throw new Error(`Error ${response.status}: ${errorText || response.statusText}`);
+      if (!startResponse.ok) {
+        const errorText = await startResponse.text();
+        throw new Error(`Error ${startResponse.status}: ${errorText || startResponse.statusText}`);
       }
 
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let completed = false;
+      const { jobId } = await startResponse.json();
+      if (!jobId) {
+        throw new Error('Server did not return a job id.');
+      }
+
+      // Step 2: poll status every second until the job finishes or errors.
+      const POLL_INTERVAL_MS = 1000;
+      const POLL_TIMEOUT_MS = 10 * 60 * 1000; // 10 minute hard cap
+      const pollStart = Date.now();
 
       while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        // SSE frames are separated by double newlines
-        const frames = buffer.split('\n\n');
-        buffer = frames.pop() ?? '';
-
-        for (const frame of frames) {
-          if (!frame.startsWith('data: ')) continue;
-          try {
-            const data = JSON.parse(frame.slice(6));
-
-            if (data.type === 'progress') {
-              const pct = data.total > 0 ? Math.round((data.current / data.total) * 95) : 0;
-              setExportProgress(pct);
-
-            } else if (data.type === 'complete') {
-              completed = true;
-              setExportProgress(100);
-              setExportSummary(data.summary);
-              setSubmissionStatus('success');
-              setTimeout(() => {
-                setIsExportModalOpen(false);
-                setSubmissionStatus('idle');
-                setExportSummary(undefined);
-                setExportProgress(0);
-              }, ENV_VARS.POST_EVENTS_UI_RESET_DELAY);
-
-            } else if (data.type === 'error') {
-              throw new Error(data.message);
-            }
-          } catch (parseErr: any) {
-            if (parseErr instanceof SyntaxError) continue;
-            throw parseErr;
-          }
+        if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+          throw new Error('Export is taking longer than expected. Please check Clio before retrying.');
         }
-      }
 
-      // Guard against stream closing without a complete frame (e.g. server crash)
-      if (!completed) {
-        throw new Error('Export ended unexpectedly. Some events may not have been created. Please check Clio before retrying.');
+        await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+
+        const statusResponse = await fetch(`/api/clio/export-status/${jobId}`);
+        if (!statusResponse.ok) {
+          // 404 most likely means the job expired (TTL is 1 hour, well above our poll timeout)
+          throw new Error(`Could not retrieve export status (HTTP ${statusResponse.status}).`);
+        }
+
+        const status = await statusResponse.json();
+        const { progress, status: jobStatus, errorMessage, summary } = status;
+
+        if (progress && progress.total > 0) {
+          const pct = Math.round((progress.current / progress.total) * 95);
+          setExportProgress(pct);
+        }
+
+        if (jobStatus === 'error') {
+          throw new Error(errorMessage || 'Export failed.');
+        }
+
+        if (jobStatus === 'complete') {
+          setExportProgress(100);
+          setExportSummary(summary);
+          setSubmissionStatus('success');
+          setTimeout(() => {
+            setIsExportModalOpen(false);
+            setSubmissionStatus('idle');
+            setExportSummary(undefined);
+            setExportProgress(0);
+          }, ENV_VARS.POST_EVENTS_UI_RESET_DELAY);
+          return;
+        }
+        // jobStatus === 'running' → continue polling
       }
     } catch (e: any) { setSubmissionStatus('error'); setSubmissionError(e.message); }
   };

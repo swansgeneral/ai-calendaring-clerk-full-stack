@@ -686,204 +686,157 @@ If there are no more events to extract, return an empty events array with is_com
 
   const sleep = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-  app.post("/api/clio/export-direct", async (req, res) => {
-    // Correlation id so every log line for this request can be grepped in KQL
-    const reqId = Math.random().toString(36).slice(2, 10);
-    const startedAt = Date.now();
-    const elapsed = () => `${Date.now() - startedAt}ms`;
-    // Force unbuffered stdout so logs surface in Container Apps even on early termination
+  // ============================================================================
+  // Polling-based Clio export
+  //
+  // The original SSE design works on Cloud Run but breaks on Azure Container
+  // Apps because the platform Authentication middleware buffers/closes
+  // streaming responses. POST creates an in-memory job and returns its id;
+  // the client polls GET /api/clio/export-status/:jobId for progress until
+  // status is 'complete' or 'error'. Plain JSON, no streaming, portable.
+  // ============================================================================
+
+  type ExportJobStatus = 'running' | 'complete' | 'error';
+
+  interface ExportJob {
+    id: string;
+    status: ExportJobStatus;
+    progress: { current: number; total: number };
+    summary: { entriesCreated: number; remindersSent: number };
+    errors: string[];
+    errorMessage?: string;
+    createdAt: number;
+    updatedAt: number;
+  }
+
+  const exportJobs = new Map<string, ExportJob>();
+  const EXPORT_JOB_TTL_MS = 60 * 60 * 1000;
+
+  setInterval(() => {
+    const now = Date.now();
+    for (const [id, job] of exportJobs) {
+      if (now - job.updatedAt > EXPORT_JOB_TTL_MS) {
+        exportJobs.delete(id);
+      }
+    }
+  }, 5 * 60 * 1000).unref?.();
+
+  const generateJobId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+
+  // Bare authenticated fetch to Clio — no req/res coupling. Use this inside
+  // background jobs where we have an access token but no live response object.
+  const clioFetch = (accessToken: string, endpoint: string, options: any = {}) =>
+    fetch(endpoint, {
+      ...options,
+      headers: { ...options.headers, Authorization: `Bearer ${accessToken}` },
+    });
+
+  async function runExportJob(
+    jobId: string,
+    accessToken: string,
+    params: {
+      matterDisplayNumber: string;
+      events: any[];
+      involvedAttorneys: any[];
+      involvedStaff: any[];
+      timezone?: string;
+    }
+  ): Promise<void> {
+    const job = exportJobs.get(jobId);
+    if (!job) return;
+
+    const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = params;
+
     const log = (msg: string, extra?: object) => {
-      const line = `[export reqId=${reqId} t=${elapsed()}] ${msg}` + (extra ? ` ${JSON.stringify(extra)}` : '');
+      const line = `[export jobId=${jobId}] ${msg}` + (extra ? ` ${JSON.stringify(extra)}` : '');
       process.stdout.write(line + '\n');
     };
-    const logErr = (msg: string, err: any) => {
-      const line = `[export reqId=${reqId} t=${elapsed()}] ERROR ${msg}: ${err?.message || err} | stack=${err?.stack || 'no-stack'}`;
-      process.stderr.write(line + '\n');
+    const updateProgress = (current: number) => {
+      job.progress.current = current;
+      job.updatedAt = Date.now();
+    };
+    const fail = (message: string) => {
+      log('FAIL', { message });
+      job.status = 'error';
+      job.errorMessage = message;
+      job.updatedAt = Date.now();
     };
 
-    const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = req.body;
-
-    log('handler entered', {
-      matterDisplayNumber,
-      eventCount: events?.length || 0,
-      hasAttorneys: !!involvedAttorneys?.length,
-      hasStaff: !!involvedStaff?.length,
-      timezone,
-      hasAccessToken: !!req.cookies.clio_access_token,
-      hasRefreshToken: !!req.cookies.clio_refresh_token,
-    });
-
-    if (!matterDisplayNumber) {
-      log('rejected: missing matterDisplayNumber');
-      return res.status(400).json({ error: "Matter Display Number is required" });
-    }
-
-    // Set SSE headers — from this point all responses are streamed frames
-    res.setHeader('Content-Type', 'text/event-stream');
-    res.setHeader('Cache-Control', 'no-cache, no-transform');
-    res.setHeader('Connection', 'keep-alive');
-    res.setHeader('X-Accel-Buffering', 'no');
-    res.flushHeaders();
-    log('SSE headers flushed');
-
-    const sendEvent = (data: object) => {
-      try {
-        res.write(`data: ${JSON.stringify(data)}\n\n`);
-      } catch (err: any) {
-        logErr('sendEvent write failed', err);
-      }
-    };
-
-    let clientDisconnected = false;
-    req.on('close', () => {
-      clientDisconnected = true;
-      log('req close event fired', { writableEnded: res.writableEnded, writableFinished: res.writableFinished });
-    });
-    res.on('close', () => log('res close event fired', { writableEnded: res.writableEnded }));
-    res.on('finish', () => log('res finish event fired'));
-    res.on('error', (err) => logErr('res error event', err));
-
-    // Calculate total operations for progress: 2 setup + 1 per event + 1 per reminder
-    const totalOps = 2 + (events?.length || 0) + (events || []).reduce((sum: number, evt: any) => {
-      return sum + (evt.reminders?.length || 0);
-    }, 0);
     let currentOp = 0;
-    log('totalOps computed', { totalOps });
+
+    const ensureSeconds = (t: string) => {
+      if (!t) return "00:00:00";
+      return t.split(':').length === 2 ? `${t}:00` : t;
+    };
+    const adjustForWeekend = (date: DateTime) => {
+      let d = date;
+      const day = d.weekday;
+      if (day === 7) d = d.minus({ days: 2 });
+      else if (day === 6) d = d.minus({ days: 1 });
+      return d;
+    };
+    const calculateReminderDate = (baseDateStr: string, quantity: number, unit: string, isAllDay: boolean, timeStr?: string, tz?: string) => {
+      let date: DateTime;
+      const zone = tz || "UTC";
+      if (isAllDay) {
+        date = DateTime.fromISO(`${baseDateStr}T00:00:00`, { zone });
+      } else {
+        date = DateTime.fromISO(`${baseDateStr}T${ensureSeconds(timeStr || '00:00:00')}`, { zone });
+      }
+      if (unit === 'minutes') date = date.minus({ minutes: quantity });
+      else if (unit === 'hours') date = date.minus({ hours: quantity });
+      else if (unit === 'days') date = date.minus({ days: quantity });
+      else if (unit === 'weeks') date = date.minus({ weeks: quantity });
+      return adjustForWeekend(date);
+    };
 
     try {
       // 1. Resolve Matter
-      if (clientDisconnected) {
-        log('client disconnected before matter lookup, ending');
-        return res.end();
-      }
-      sendEvent({ type: 'progress', current: currentOp, total: totalOps });
-      log('about to call Clio matters API');
+      log('looking up matter', { matterDisplayNumber });
+      const matterResponse = await clioFetch(accessToken, `https://app.clio.com/api/v4/matters.json?query=${encodeURIComponent(matterDisplayNumber)}&fields=id,display_number,client{id,last_name}`);
 
-      let matterResponse;
-      try {
-        matterResponse = await callClioApi(req, res, `https://app.clio.com/api/v4/matters.json?query=${encodeURIComponent(matterDisplayNumber)}&fields=id,display_number,client{id,last_name}`);
-        log('Clio matters API returned', { isNull: !matterResponse, status: matterResponse?.status, ok: matterResponse?.ok });
-      } catch (err: any) {
-        logErr('callClioApi threw during matters lookup', err);
-        sendEvent({ type: 'error', message: `Matters lookup failed: ${err?.message || err}` });
-        return res.end();
+      if (matterResponse.status === 401) {
+        return fail("Clio authentication expired. Please reconnect Clio and try again.");
       }
-
-      if (!matterResponse) {
-        log('matterResponse is null (likely missing/expired Clio token)');
-        sendEvent({ type: 'error', message: 'Not authenticated with Clio.' });
-        return res.end();
-      }
-
       if (!matterResponse.ok) {
-        const errBody = await matterResponse.text().catch(() => '<unreadable>');
-        log('matters API returned non-OK', { status: matterResponse.status, body: errBody.slice(0, 500) });
-        sendEvent({ type: 'error', message: `Failed to fetch matter from Clio (status ${matterResponse.status}).` });
-        return res.end();
+        const errText = await matterResponse.text().catch(() => '');
+        return fail(`Failed to fetch matter from Clio (status ${matterResponse.status}). ${errText.slice(0, 200)}`);
       }
 
-      let mattersData;
-      try {
-        mattersData = await matterResponse.json();
-      } catch (err: any) {
-        logErr('matters response JSON parse failed', err);
-        sendEvent({ type: 'error', message: 'Could not parse Clio matters response.' });
-        return res.end();
-      }
-      log('matters response parsed', { candidateCount: mattersData?.data?.length || 0 });
-
-      const matter = mattersData.data.find((m: any) => m.display_number === matterDisplayNumber);
-
+      const mattersData = await matterResponse.json();
+      const matter = mattersData.data?.find((m: any) => m.display_number === matterDisplayNumber);
       if (!matter) {
-        const candidates = (mattersData.data || []).map((m: any) => m.display_number).slice(0, 10);
-        log('matter not in candidates', { searched: matterDisplayNumber, candidates });
-        sendEvent({ type: 'error', message: `Matter "${matterDisplayNumber}" not found in Clio.` });
-        return res.end();
+        return fail(`Matter "${matterDisplayNumber}" not found in Clio.`);
       }
-
-      log('matter resolved', { id: matter.id, display_number: matter.display_number });
+      log('matter resolved', { id: matter.id });
 
       const clientLastName = matter.client?.last_name || "Client";
       const clientId = matter.client?.id;
 
-      // 2. Fetch All Clio Users for resolution (including notification methods)
+      // 2. Fetch Users
       currentOp++;
-      if (clientDisconnected) {
-        log('client disconnected before users lookup, ending');
-        return res.end();
-      }
-      sendEvent({ type: 'progress', current: currentOp, total: totalOps });
-      log('about to call Clio users API');
+      updateProgress(currentOp);
 
-      let usersResponse;
-      try {
-        usersResponse = await callClioApi(req, res, "https://app.clio.com/api/v4/users.json?fields=id,name,subscription_type,default_calendar_id,notification_methods");
-        log('Clio users API returned', { isNull: !usersResponse, status: usersResponse?.status, ok: usersResponse?.ok });
-      } catch (err: any) {
-        logErr('callClioApi threw during users lookup', err);
-        sendEvent({ type: 'error', message: `Users lookup failed: ${err?.message || err}` });
-        return res.end();
+      const usersResponse = await clioFetch(accessToken, "https://app.clio.com/api/v4/users.json?fields=id,name,subscription_type,default_calendar_id,notification_methods");
+      if (usersResponse.status === 401) {
+        return fail("Clio authentication expired during users lookup.");
       }
-
-      if (!usersResponse) {
-        sendEvent({ type: 'error', message: 'Not authenticated with Clio.' });
-        return res.end();
+      if (!usersResponse.ok) {
+        const errText = await usersResponse.text().catch(() => '');
+        return fail(`Failed to fetch users (status ${usersResponse.status}). ${errText.slice(0, 200)}`);
       }
-
       const usersData = await usersResponse.json();
-      log('users response parsed', { userCount: usersData?.data?.length || 0 });
-      const allUsers = usersData.data;
+      const allUsers = usersData.data || [];
 
-      let entriesCreated = 0;
-      let remindersSent = 0;
-      const errors: string[] = [];
-
-      const ensureSeconds = (t: string) => {
-        if (!t) return "00:00:00";
-        return t.split(':').length === 2 ? `${t}:00` : t;
-      };
-
-      const adjustForWeekend = (date: DateTime) => {
-        let d = date;
-        const day = d.weekday; // 1 = Monday, 7 = Sunday in Luxon
-        if (day === 7) d = d.minus({ days: 2 }); // Sunday -> Friday
-        else if (day === 6) d = d.minus({ days: 1 }); // Saturday -> Friday
-        return d;
-      };
-
-      const calculateReminderDate = (baseDateStr: string, quantity: number, unit: string, isAllDay: boolean, timeStr?: string, tz?: string) => {
-        let date: DateTime;
-        const zone = tz || "UTC";
-
-        if (isAllDay) {
-          date = DateTime.fromISO(`${baseDateStr}T00:00:00`, { zone });
-        } else {
-          date = DateTime.fromISO(`${baseDateStr}T${ensureSeconds(timeStr || '00:00:00')}`, { zone });
-        }
-
-        if (unit === 'minutes') date = date.minus({ minutes: quantity });
-        else if (unit === 'hours') date = date.minus({ hours: quantity });
-        else if (unit === 'days') date = date.minus({ days: quantity });
-        else if (unit === 'weeks') date = date.minus({ weeks: quantity });
-
-        return adjustForWeekend(date);
-      };
-
-      // 3. Iterate through events
-      log('entering per-event loop', { eventCount: events.length });
-      for (const [eventIdx, event] of (events as any[]).entries()) {
+      // 3. Iterate events
+      log('processing events', { count: events.length });
+      for (const [eventIdx, event] of events.entries()) {
         currentOp++;
-        if (clientDisconnected) {
-          log('client disconnected during event loop, ending', { eventIdx });
-          return res.end();
-        }
-        sendEvent({ type: 'progress', current: currentOp, total: totalOps });
-        log('processing event', { eventIdx, title: event.title, date: event.date });
+        updateProgress(currentOp);
+        log('processing event', { eventIdx, title: event.title });
 
         try {
-          // Resolve Attendees
           const attendeeIds = new Set<number>();
-
           if (event.inviteAllAttorneys && involvedAttorneys) {
             involvedAttorneys.forEach((u: any) => attendeeIds.add(u.calendar_id));
           }
@@ -893,12 +846,9 @@ If there are no more events to extract, return an empty events array with is_com
           if (event["Firm Invitees"]) {
             event["Firm Invitees"].forEach((i: any) => attendeeIds.add(i.calendar_id));
           }
-
           const attendees = Array.from(attendeeIds).map(id => ({ id: Number(id), type: "Calendar", _destroy: false }));
 
-          // Create Primary Calendar Entry
           const eventTitle = `${clientLastName}: ${event.title}`;
-
           let startAt: string;
           let endAt: string;
 
@@ -914,10 +864,8 @@ If there are no more events to extract, return an empty events array with is_com
 
           const calendarOwnerId = Number(event["Calendar Owner"]);
           const matterId = Number(matter.id);
-
           if (isNaN(calendarOwnerId) || isNaN(matterId)) {
-            console.error(`Invalid IDs — calendarOwner: ${event["Calendar Owner"]}, matter: ${matter.id}`);
-            errors.push(`Failed to create event "${event.title}": Invalid calendar owner or matter ID`);
+            job.errors.push(`Failed to create event "${event.title}": Invalid calendar owner or matter ID`);
             continue;
           }
 
@@ -936,54 +884,46 @@ If there are no more events to extract, return an empty events array with is_com
             }
           };
 
-          console.log(`Creating event: ${eventTitle}`);
-
-          const createEventResponse = await callClioApi(req, res, "https://app.clio.com/api/v4/calendar_entries.json", {
+          const createEventResponse = await clioFetch(accessToken, "https://app.clio.com/api/v4/calendar_entries.json", {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(calendarEntryPayload)
           });
 
-          if (!createEventResponse || !createEventResponse.ok) {
-            const errText = createEventResponse ? await createEventResponse.text() : "Auth failed";
-            console.error(`Failed to create event "${event.title}":`, errText);
-            errors.push(`Failed to create event "${event.title}": ${errText}`);
+          if (createEventResponse.status === 401) {
+            return fail("Clio authentication expired while creating an event.");
+          }
+          if (!createEventResponse.ok) {
+            const errText = await createEventResponse.text().catch(() => '');
+            job.errors.push(`Failed to create event "${event.title}": ${errText.slice(0, 200)}`);
             continue;
           }
 
           const createdEventData = await createEventResponse.json();
           const clioEventId = createdEventData.data.id;
-          entriesCreated++;
+          job.summary.entriesCreated++;
+          job.updatedAt = Date.now();
 
-          // Invite Client if requested
           if (event["Invite Client"] && clientId) {
             const patchPayload = {
               data: {
-                attendees: [
-                  {
-                    id: clientId,
-                    type: "Contact",
-                    _destroy: false
-                  }
-                ]
+                attendees: [{ id: clientId, type: "Contact", _destroy: false }]
               }
             };
-            await callClioApi(req, res, `https://app.clio.com/api/v4/calendar_entries/${clioEventId}.json`, {
+            await clioFetch(accessToken, `https://app.clio.com/api/v4/calendar_entries/${clioEventId}.json`, {
               method: "PATCH",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(patchPayload)
             });
           }
 
-          // 4. Iterate through reminders
+          // Reminders
           if (event.reminders && event.reminders.length > 0) {
             for (const reminder of event.reminders) {
               currentOp++;
-              if (clientDisconnected) return res.end();
-              sendEvent({ type: 'progress', current: currentOp, total: totalOps });
+              updateProgress(currentOp);
 
               try {
-                // Resolve Recipients
                 const recipientIds = new Set<number>();
                 if (reminder.remindAllAttorneys && involvedAttorneys) {
                   involvedAttorneys.forEach((u: any) => recipientIds.add(u.calendar_id));
@@ -994,14 +934,12 @@ If there are no more events to extract, return an empty events array with is_com
                 if (reminder.manualUsers) {
                   reminder.manualUsers.forEach((u: any) => recipientIds.add(u.calendar_id));
                 }
-
                 const recipients = Array.from(recipientIds);
 
                 if (reminder.type === 'Calendar Event') {
                   const reminderTitle = `${clientLastName}: ${reminder.calendarTitle || event.title}`;
                   const reminderDate = calculateReminderDate(event.start_date, reminder.quantity, reminder.unit, event.is_all_day, event.start_time, timezone);
                   const reminderDateStr = reminderDate.toISO() || "";
-
                   const reminderEndDateStr = reminderDate.plus({ days: 1 }).startOf('day').toISO() || "";
 
                   const reminderCalendarPayload = {
@@ -1018,18 +956,18 @@ If there are no more events to extract, return an empty events array with is_com
                     }
                   };
 
-                  const createReminderCalResponse = await callClioApi(req, res, "https://app.clio.com/api/v4/calendar_entries.json", {
+                  const createReminderCalResponse = await clioFetch(accessToken, "https://app.clio.com/api/v4/calendar_entries.json", {
                     method: "POST",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify(reminderCalendarPayload)
                   });
 
-                  if (createReminderCalResponse && createReminderCalResponse.ok) {
-                    entriesCreated++;
+                  if (createReminderCalResponse.ok) {
+                    job.summary.entriesCreated++;
+                    job.updatedAt = Date.now();
                   } else {
-                    const errText = createReminderCalResponse ? await createReminderCalResponse.text() : "Auth failed";
-                    console.error(`Failed to create calendar reminder for "${event.title}":`, errText);
-                    errors.push(`Failed to create calendar reminder for "${event.title}": ${errText}`);
+                    const errText = await createReminderCalResponse.text().catch(() => '');
+                    job.errors.push(`Failed to create calendar reminder for "${event.title}": ${errText.slice(0, 200)}`);
                   }
                 } else if (reminder.type === 'Email') {
                   for (const recipientCalendarId of recipients) {
@@ -1038,11 +976,11 @@ If there are no more events to extract, return an empty events array with is_com
 
                     const emailMethod = user.notification_methods?.find((m: any) => m.type === 'Email');
                     if (!emailMethod) {
-                      errors.push(`User ${user.name} does not have an Email notification method configured in Clio.`);
+                      job.errors.push(`User ${user.name} does not have an Email notification method configured in Clio.`);
                       continue;
                     }
 
-                    const reminderPayload = {
+                    const reminderPayload: any = {
                       data: {
                         subject: { id: Number(clioEventId), type: "CalendarEntry" },
                         notification_method: { id: Number(emailMethod.id) },
@@ -1050,47 +988,109 @@ If there are no more events to extract, return an empty events array with is_com
                         duration_unit: reminder.unit === 'weeks' ? 'days' : reminder.unit
                       }
                     };
-
                     if (reminder.unit === 'weeks') {
                       reminderPayload.data.duration_value = reminder.quantity * 7;
                       reminderPayload.data.duration_unit = 'days';
                     }
 
-                    const createReminderResponse = await callClioApi(req, res, "https://app.clio.com/api/v4/reminders.json", {
+                    const createReminderResponse = await clioFetch(accessToken, "https://app.clio.com/api/v4/reminders.json", {
                       method: "POST",
                       headers: { "Content-Type": "application/json" },
                       body: JSON.stringify(reminderPayload)
                     });
 
-                    if (createReminderResponse && createReminderResponse.ok) {
-                      remindersSent++;
+                    if (createReminderResponse.ok) {
+                      job.summary.remindersSent++;
+                      job.updatedAt = Date.now();
                     } else {
-                      const errText = createReminderResponse ? await createReminderResponse.text() : "Auth failed";
-                      errors.push(`Failed to send email reminder to ${user.name}: ${errText}`);
+                      const errText = await createReminderResponse.text().catch(() => '');
+                      job.errors.push(`Failed to send email reminder to ${user.name}: ${errText.slice(0, 200)}`);
                     }
 
                     await sleep(1000);
                   }
                 }
               } catch (remErr: any) {
-                errors.push(`Error processing reminder for "${event.title}": ${remErr.message}`);
+                job.errors.push(`Error processing reminder for "${event.title}": ${remErr?.message || remErr}`);
               }
             }
           }
         } catch (evtErr: any) {
-          errors.push(`Error processing event "${event.title}": ${evtErr.message}`);
+          job.errors.push(`Error processing event "${event.title}": ${evtErr?.message || evtErr}`);
         }
       }
 
-      log('export complete', { entriesCreated, remindersSent, errorCount: errors.length });
-      sendEvent({ type: 'complete', summary: { entriesCreated, remindersSent }, errors });
-      res.end();
-
+      log('export complete', { entriesCreated: job.summary.entriesCreated, remindersSent: job.summary.remindersSent, errorCount: job.errors.length });
+      job.status = 'complete';
+      job.updatedAt = Date.now();
     } catch (error: any) {
-      logErr('uncaught error in export handler', error);
-      sendEvent({ type: 'error', message: error.message });
-      res.end();
+      process.stderr.write(`[export jobId=${jobId}] UNCAUGHT: ${error?.message || error}\n${error?.stack || ''}\n`);
+      return fail(error?.message || 'Unknown error during export');
     }
+  }
+
+  app.post("/api/clio/export-direct", async (req, res) => {
+    const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = req.body;
+
+    if (!matterDisplayNumber) {
+      return res.status(400).json({ error: "Matter Display Number is required" });
+    }
+
+    const accessToken = req.cookies.clio_access_token;
+    if (!accessToken) {
+      return res.status(401).json({ error: "Not authenticated with Clio. Please reconnect Clio and try again." });
+    }
+
+    const totalOps = 2 + (events?.length || 0) + (events || []).reduce((sum: number, evt: any) => {
+      return sum + (evt.reminders?.length || 0);
+    }, 0);
+
+    const jobId = generateJobId();
+    const job: ExportJob = {
+      id: jobId,
+      status: 'running',
+      progress: { current: 0, total: totalOps },
+      summary: { entriesCreated: 0, remindersSent: 0 },
+      errors: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    exportJobs.set(jobId, job);
+
+    console.log(`[export jobId=${jobId}] starting`, JSON.stringify({ matterDisplayNumber, eventCount: events?.length || 0, totalOps }));
+
+    // Fire and forget — client polls /api/clio/export-status/:jobId for progress
+    runExportJob(jobId, accessToken, {
+      matterDisplayNumber,
+      events: events || [],
+      involvedAttorneys: involvedAttorneys || [],
+      involvedStaff: involvedStaff || [],
+      timezone,
+    }).catch((err: any) => {
+      process.stderr.write(`[export jobId=${jobId}] runExportJob threw outside try: ${err?.message || err}\n`);
+      const j = exportJobs.get(jobId);
+      if (j) {
+        j.status = 'error';
+        j.errorMessage = err?.message || String(err);
+        j.updatedAt = Date.now();
+      }
+    });
+
+    res.status(202).json({ jobId });
+  });
+
+  app.get("/api/clio/export-status/:jobId", (req, res) => {
+    const job = exportJobs.get(req.params.jobId);
+    if (!job) {
+      return res.status(404).json({ error: "Job not found or has expired" });
+    }
+    res.json({
+      status: job.status,
+      progress: job.progress,
+      summary: job.summary,
+      errors: job.errors,
+      errorMessage: job.errorMessage,
+    });
   });
 
   // Vite middleware for development
