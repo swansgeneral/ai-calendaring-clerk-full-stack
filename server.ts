@@ -178,6 +178,11 @@ function selectStorage(): { sop: SopStorage; jobs: JobStore } | null {
       const serviceAccount = JSON.parse(process.env.FIREBASE_PRIVATE_KEY!);
       admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
       const db = admin.firestore();
+      // Firestore rejects undefined values by default; the ExportJob shape
+      // has optional fields (errorMessage) that are undefined when a job
+      // first starts. Ignoring undefined keeps the put() calls clean across
+      // both backends — Cosmos already drops undefined via JSON serialization.
+      db.settings({ ignoreUndefinedProperties: true });
       console.log("✅ Storage backend: Firebase Firestore");
       return { sop: new FirestoreSopStorage(db), jobs: new FirestoreJobStore(db) };
     } catch (err) {
