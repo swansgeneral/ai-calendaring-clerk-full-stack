@@ -557,40 +557,14 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
       return { valid: false, message: "No events selected for export." };
     }
 
-    const missingFields: string[] = [];
+    // Only the default calendar host is mandatory. Involved attorneys / staff
+    // are optional — when an event toggles "invite all" but the corresponding
+    // list is empty, the server treats it as "no one to invite" and proceeds.
     if (!analysisState.defaultCalendarName) {
-        missingFields.push("Default Calendar Host");
-    }
-    if ((analysisState.involvedAttorneys || []).length === 0) {
-        missingFields.push("Involved Attorneys");
-    }
-    if ((analysisState.involvedStaff || []).length === 0) {
-        missingFields.push("Involved Staff Members");
-    }
-
-    if (missingFields.length > 0) {
-        return { 
-          valid: false, 
-          message: `Please select the following mandatory fields in the top sidebar menu: ${missingFields.join(', ')}.` 
+        return {
+          valid: false,
+          message: "Please select the Default Calendar Host in the top sidebar menu."
         };
-    }
-
-    // Secondary check for event-specific settings (though main logic above usually covers it)
-    const staffMissing = (analysisState.involvedStaff || []).length === 0;
-    const attorneysMissing = (analysisState.involvedAttorneys || []).length === 0;
-    const genericError = "Some events are set to invite all staff members or all attorneys, but no users have been selected in the top sidebar menu.";
-    
-    for (const event of selectedEvents) {
-      if ((event.inviteAllStaff && staffMissing) || (event.inviteAllAttorneys && attorneysMissing)) {
-        return { valid: false, message: genericError };
-      }
-      if (event.reminders) {
-        for (const r of event.reminders) {
-          if ((r.remindStaff && staffMissing) || (r.remindAttorneys && attorneysMissing)) {
-            return { valid: false, message: genericError };
-          }
-        }
-      }
     }
     return { valid: true };
   };
@@ -1010,11 +984,11 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
                    </label>
                    <div 
                       onClick={() => setIsAttorneyDropdownOpen(!isAttorneyDropdownOpen)}
-                      className={`flex items-center gap-2 border rounded-md px-2 shadow-sm cursor-pointer transition-all h-[32px] overflow-hidden ${(validationError && (analysisState.involvedAttorneys || []).length === 0) ? 'bg-red-50 border-red-300 ring-1 ring-red-200' : 'bg-slate-50 border-slate-200 hover:border-slate-300'}`}
+                      className="flex items-center gap-2 border rounded-md px-2 shadow-sm cursor-pointer transition-all h-[32px] overflow-hidden bg-slate-50 border-slate-200 hover:border-slate-300"
                    >
-                      <Gavel className={`w-3 h-3 flex-shrink-0 ${(validationError && (analysisState.involvedAttorneys || []).length === 0) ? 'text-red-500' : 'text-blue-600'}`} />
+                      <Gavel className="w-3 h-3 flex-shrink-0 text-blue-600" />
                       <div className="flex-1 truncate text-xs font-bold text-slate-800">
-                        {analysisState.involvedAttorneys?.length ? analysisState.involvedAttorneys.join(', ') : <span className="text-slate-400 font-normal italic text-[11px]">Select attorneys (Required)...</span>}
+                        {analysisState.involvedAttorneys?.length ? analysisState.involvedAttorneys.join(', ') : <span className="text-slate-400 font-normal italic text-[11px]">Select attorneys (optional)...</span>}
                       </div>
                       <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform ${isAttorneyDropdownOpen ? 'rotate-180' : ''}`} />
                    </div>
@@ -1057,11 +1031,11 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
                    </label>
                    <div 
                       onClick={() => setIsStaffDropdownOpen(!isStaffDropdownOpen)}
-                      className={`flex items-center gap-2 border rounded-md px-2 shadow-sm cursor-pointer transition-all h-[32px] overflow-hidden ${(validationError && (analysisState.involvedStaff || []).length === 0) ? 'bg-red-50 border-red-300 ring-1 ring-red-200' : 'bg-slate-50 border-slate-200 hover:border-slate-300'}`}
+                      className="flex items-center gap-2 border rounded-md px-2 shadow-sm cursor-pointer transition-all h-[32px] overflow-hidden bg-slate-50 border-slate-200 hover:border-slate-300"
                    >
-                      <Users className={`w-3 h-3 flex-shrink-0 ${(validationError && (analysisState.involvedStaff || []).length === 0) ? 'text-red-500' : 'text-purple-600'}`} />
+                      <Users className="w-3 h-3 flex-shrink-0 text-purple-600" />
                       <div className="flex-1 truncate text-xs font-bold text-slate-800">
-                        {analysisState.involvedStaff?.length ? analysisState.involvedStaff.join(', ') : <span className="text-slate-400 font-normal italic text-[11px]">Select staff members (Required)...</span>}
+                        {analysisState.involvedStaff?.length ? analysisState.involvedStaff.join(', ') : <span className="text-slate-400 font-normal italic text-[11px]">Select staff members (optional)...</span>}
                       </div>
                       <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform ${isStaffDropdownOpen ? 'rotate-180' : ''}`} />
                    </div>
