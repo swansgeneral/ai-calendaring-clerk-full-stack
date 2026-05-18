@@ -1073,7 +1073,7 @@ async function startServer() {
     try {
       // 1. Resolve Matter
       log('looking up matter', { matterDisplayNumber });
-      const matterResponse = await clioFetch(accessToken, `https://app.clio.com/api/v4/matters.json?query=${encodeURIComponent(matterDisplayNumber)}&fields=id,display_number,client{id,last_name}`);
+      const matterResponse = await clioFetch(accessToken, `https://app.clio.com/api/v4/matters.json?query=${encodeURIComponent(matterDisplayNumber)}&fields=id,display_number,client{id}`);
 
       if (matterResponse.status === 401) {
         return fail("Clio authentication expired. Please reconnect Clio and try again.");
@@ -1090,7 +1090,6 @@ async function startServer() {
       }
       log('matter resolved', { id: matter.id });
 
-      const clientLastName = matter.client?.last_name || "Client";
       const clientId = matter.client?.id;
 
       // 2. Fetch Users
@@ -1128,7 +1127,7 @@ async function startServer() {
           }
           const attendees = Array.from(attendeeIds).map(id => ({ id: Number(id), type: "Calendar", _destroy: false }));
 
-          const eventTitle = `${clientLastName}: ${event.title}`;
+          const eventTitle = event.title;
           let startAt: string;
           let endAt: string;
 
@@ -1217,7 +1216,7 @@ async function startServer() {
                 const recipients = Array.from(recipientIds);
 
                 if (reminder.type === 'Calendar Event') {
-                  const reminderTitle = `${clientLastName}: ${reminder.calendarTitle || event.title}`;
+                  const reminderTitle = reminder.calendarTitle || event.title;
                   const reminderDate = calculateReminderDate(event.start_date, reminder.quantity, reminder.unit, event.is_all_day, event.start_time, timezone);
                   const reminderDateStr = reminderDate.toISO() || "";
                   const reminderEndDateStr = reminderDate.plus({ days: 1 }).startOf('day').toISO() || "";
