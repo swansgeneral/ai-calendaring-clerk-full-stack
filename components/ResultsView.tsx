@@ -980,7 +980,7 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
              <div className="flex gap-2">
                 <div className="flex-1 min-w-0 relative" ref={attorneyRef}>
                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 ml-1">
-                     Involved Attorneys <span className="text-red-500">*</span>
+                     Involved Attorneys
                    </label>
                    <div 
                       onClick={() => setIsAttorneyDropdownOpen(!isAttorneyDropdownOpen)}
@@ -1027,7 +1027,7 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
 
                 <div className="flex-1 min-w-0 relative" ref={staffRef}>
                    <label className="block text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-1 ml-1">
-                     Involved Staff Members <span className="text-red-500">*</span>
+                     Involved Staff Members
                    </label>
                    <div 
                       onClick={() => setIsStaffDropdownOpen(!isStaffDropdownOpen)}
