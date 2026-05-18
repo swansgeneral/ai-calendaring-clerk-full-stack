@@ -6,11 +6,11 @@ An advanced, full-stack legal docketing assistant designed for law firms to anal
 
 ## 🚀 Overview
 
-The AI Calendaring Clerk V2 automates the complex process of docketing by combining Google's Gemini AI with deep integrations into legal practice management software. It doesn't just extract dates; it understands the context, applies your firm's specific rules (reminders, calendar mappings), and syncs them directly to your system of record.
+The AI Calendaring Clerk V2 automates the complex process of docketing by combining Anthropic's Claude AI with deep integrations into legal practice management software. It doesn't just extract dates; it understands the context, applies your firm's specific rules (reminders, calendar mappings), and syncs them directly to your system of record.
 
 ## ✨ Key Features
 
-- **Intelligent PDF Analysis**: High-fidelity PDF processing using `pdfjs-dist` combined with Gemini's reasoning capabilities.
+- **Intelligent PDF Analysis**: High-fidelity PDF processing using `pdfjs-dist` combined with Claude's reasoning capabilities.
 - **Automated Date Calculation**: Identifies "trigger" events and automatically computes relative deadlines (e.g., "10 days after service").
 - **Clio Manage Integration**: Secure OAuth 2.0 connection to Clio Manage for real-time access to users and calendars.
 - **SOP Rules Engine**: Configure firm-wide rules in a dedicated dashboard. Map extracted events to specific Clio calendars and set automatic reminders (Email or Calendar).
@@ -22,7 +22,7 @@ The AI Calendaring Clerk V2 automates the complex process of docketing by combin
 
 - **Frontend**: React 19, Framer Motion, Lucide React, Tailwind CSS.
 - **Backend**: Node.js, Express, WebSockets (`ws`).
-- **AI Engine**: Google Gemini API (`@google/genai`).
+- **AI Engine**: Anthropic Claude API (`@anthropic-ai/sdk`, Opus 4.7).
 - **Database**: Firebase Firestore (Google Cloud) or Azure Cosmos DB (Azure) — for SOP rules. The same image works with either; pick the one for the cloud you're deploying to.
 - **Integrations**: Clio Manage API (OAuth 2.0).
 
@@ -89,7 +89,7 @@ A **fork** is your own copy of this codebase hosted under your GitHub account. Y
 
 1. Go to [Billing](https://console.cloud.google.com/billing) and link a billing account to your new project
 
-> Running this app has minimal cost. Aside from standard Cloud Run infrastructure (which has a generous free tier), the only ongoing cost is Gemini API usage — typically a few cents per dozen files analyzed.
+> Running this app has minimal cost. Aside from standard Cloud Run infrastructure (which has a generous free tier), the only ongoing cost is Anthropic API usage — typically under a dollar per dozen files analyzed.
 
 ---
 
@@ -150,10 +150,11 @@ A **fork** is your own copy of this codebase hosted under your GitHub account. Y
 
 ---
 
-### Step 7 — Get a Gemini API Key
+### Step 7 — Get an Anthropic API Key
 
-1. Go to [Google AI Studio](https://aistudio.google.com/api-keys)
-2. Click **Create API key** and copy it
+1. Go to the [Anthropic Console](https://console.anthropic.com/)
+2. Create a project (or pick an existing one) → **Settings → API Keys → Create Key** → copy it
+3. **Set a spend cap** on the project (Settings → Limits) to prevent runaway cost from a bug or misuse
 
 ---
 
@@ -173,7 +174,7 @@ A **fork** is your own copy of this codebase hosted under your GitHub account. Y
 | `APP_URL` | Your Cloud Run app URL (e.g. `https://your-app-405499094876.us-south1.run.app`) |
 | `CLIO_CLIENT_ID` | From the Clio Developer Portal (Step 6) |
 | `CLIO_CLIENT_SECRET` | From the Clio Developer Portal (Step 6) |
-| `API_KEY` | Your Gemini API key (Step 7) |
+| `API_KEY` | Your Anthropic API key (Step 7) |
 
 3. Still in the same revision editor, scroll down to the **Requests** section and set **Request timeout** to `600` seconds. This is required for large exports with many events and reminders.
 
@@ -190,7 +191,7 @@ A **fork** is your own copy of this codebase hosted under your GitHub account. Y
 - A [GitHub account](https://github.com)
 - An [Azure account](https://portal.azure.com) with an active subscription
 - A [Clio Manage](https://developers.clio.com/) account with developer access
-- A [Gemini API key](https://aistudio.google.com/api-keys)
+- An [Anthropic API key](https://console.anthropic.com/) with a spend cap configured
 
 > **Note:** Unlike the Cloud Run path, you don't need to fork the repository. The app's Docker image is published publicly to GitHub Container Registry and pulled directly by Azure.
 
@@ -276,7 +277,7 @@ In the Container App → **Application → Containers** → click the `main` con
 | `COSMOS_DATABASE` | `calendaring_clerk` |
 | `COSMOS_CONTAINER` | `sop_data` |
 | `COSMOS_SOP_DOC_ID` | `main_document` |
-| `API_KEY` | Your Gemini API key |
+| `API_KEY` | Your Anthropic API key |
 | `CLIO_CLIENT_ID` | From the Clio Developer Portal (Step 4) |
 | `CLIO_CLIENT_SECRET` | From the Clio Developer Portal (Step 4) |
 
