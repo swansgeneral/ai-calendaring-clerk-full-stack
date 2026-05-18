@@ -102,25 +102,60 @@ export const analyzeDocument = async (
   let detectedCaseType: CaseType = ENV_VARS.DEFAULT_CASE_TYPE as CaseType;
 
   try {
-    const response = await fetch("/api/gemini/analyze", {
+    // 1) Kick off the job — returns 202 + { jobId } immediately.
+    const startResponse = await fetch("/api/gemini/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ filePart })
     });
 
-    if (!response.ok) {
-      const errData = await response.json().catch(() => ({}));
-      throw new Error(errData.error || `Server error: ${response.statusText}`);
+    if (!startResponse.ok) {
+      const errData = await startResponse.json().catch(() => ({}));
+      throw new Error(errData.error || `Server error: ${startResponse.statusText}`);
     }
 
-    const resultData = await response.json() as { case_type: string, events: any[] };
-    
-    if (resultData.case_type) {
-      detectedCaseType = resultData.case_type as CaseType;
-    }
-    
-    if (resultData.events && Array.isArray(resultData.events)) {
-      combinedEvents = resultData.events;
+    const { jobId } = await startResponse.json();
+    if (!jobId) throw new Error("Server did not return a job id for analysis.");
+
+    // 2) Poll for completion. Gemini calls take 10-90s; 10 minute hard cap.
+    const POLL_INTERVAL_MS = 2000;
+    const POLL_TIMEOUT_MS = 10 * 60 * 1000;
+    const pollStart = Date.now();
+
+    while (true) {
+      if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+        throw new Error("Analysis is taking longer than expected. Please retry.");
+      }
+      await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+
+      const statusResponse = await fetch(`/api/gemini/analyze-status/${jobId}`);
+      if (!statusResponse.ok) {
+        throw new Error(`Could not retrieve analysis status (HTTP ${statusResponse.status}).`);
+      }
+      const status = await statusResponse.json();
+
+      if (onProgress && status.progress?.total > 0) {
+        onProgress({
+          current: status.progress.current,
+          total: status.progress.total,
+          phase: 'analyzing'
+        });
+      }
+
+      if (status.status === 'error') {
+        throw new Error(status.errorMessage || 'Analysis failed.');
+      }
+      if (status.status === 'complete') {
+        const resultData = status.result as { case_type: string, events: any[] };
+        if (resultData?.case_type) {
+          detectedCaseType = resultData.case_type as CaseType;
+        }
+        if (resultData?.events && Array.isArray(resultData.events)) {
+          combinedEvents = resultData.events;
+        }
+        break;
+      }
+      // status.status === 'running' → continue polling
     }
   } catch (e: any) {
     console.error(`Analysis failed:`, e);
@@ -243,25 +278,57 @@ export const applyAutoReminders = async (
     "Calendar Description": s["Description in Calendar Event"] ?? "N/A"
   })));
 
-  // 2. Call Server to Match Extracted Events -> SOP Record IDs
-  const response = await fetch("/api/gemini/apply-reminders", {
+  // 2. Call Server to Match Extracted Events -> SOP Record IDs.
+  // The endpoint is polling-based: POST kicks off the job, then poll status.
+  const startResponse = await fetch("/api/gemini/apply-reminders", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ extractedForAI, sopListForAI })
   });
 
-  if (!response.ok) {
-    const errData = await response.json().catch(() => ({}));
-    throw new Error(errData.error || `Server error: ${response.statusText}`);
+  if (!startResponse.ok) {
+    const errData = await startResponse.json().catch(() => ({}));
+    throw new Error(errData.error || `Server error: ${startResponse.statusText}`);
   }
 
-  const resultData = await response.json() as { 
-    matches: { 
-      eventId: string, 
+  const { jobId } = await startResponse.json();
+  if (!jobId) throw new Error("Server did not return a job id for apply-reminders.");
+
+  const POLL_INTERVAL_MS = 2000;
+  const POLL_TIMEOUT_MS = 5 * 60 * 1000;
+  const pollStart = Date.now();
+  let resultData: {
+    matches: {
+      eventId: string,
       matchedRecordId: string | null,
-      updatedTitle?: string | null 
-    }[] 
-  };
+      updatedTitle?: string | null
+    }[]
+  } | undefined;
+
+  while (true) {
+    if (Date.now() - pollStart > POLL_TIMEOUT_MS) {
+      throw new Error("Reminders matching is taking longer than expected.");
+    }
+    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+
+    const statusResponse = await fetch(`/api/gemini/apply-reminders-status/${jobId}`);
+    if (!statusResponse.ok) {
+      throw new Error(`Could not retrieve reminders status (HTTP ${statusResponse.status}).`);
+    }
+    const status = await statusResponse.json();
+
+    if (status.status === 'error') {
+      throw new Error(status.errorMessage || 'Reminders matching failed.');
+    }
+    if (status.status === 'complete') {
+      resultData = status.result;
+      break;
+    }
+  }
+
+  if (!resultData) {
+    throw new Error("Reminders matching returned no result.");
+  }
   
   let matchedCount = 0;
   let remindersAddedCount = 0;

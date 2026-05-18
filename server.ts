@@ -33,15 +33,28 @@ const FIRESTORE_SOP_DOC_ID = "main_document";
 
 type SopDocument = { Reminders: any[]; "Calendar Events": any[]; [key: string]: any };
 
-interface ExportJob {
+type JobStatus = 'running' | 'complete' | 'error';
+
+interface BaseJob {
   id: string;
-  status: 'running' | 'complete' | 'error';
+  status: JobStatus;
   progress: { current: number; total: number };
-  summary: { entriesCreated: number; remindersSent: number };
   errors: string[];
   errorMessage?: string;
   createdAt: number;
   updatedAt: number;
+}
+
+interface ExportJob extends BaseJob {
+  summary: { entriesCreated: number; remindersSent: number };
+}
+
+interface AnalyzeJob extends BaseJob {
+  result?: { case_type: string | null; events: any[] };
+}
+
+interface ApplyRemindersJob extends BaseJob {
+  result?: { matches: any[] };
 }
 
 interface SopStorage {
@@ -50,8 +63,8 @@ interface SopStorage {
 }
 
 interface JobStore {
-  get(jobId: string): Promise<ExportJob | null>;
-  put(job: ExportJob): Promise<void>;
+  get<T extends BaseJob = BaseJob>(jobId: string): Promise<T | null>;
+  put<T extends BaseJob>(job: T): Promise<void>;
   cleanupExpired(maxAgeMs: number): Promise<void>;
 }
 
@@ -75,18 +88,18 @@ class CosmosSopStorage implements SopStorage {
 
 class CosmosJobStore implements JobStore {
   constructor(private container: Container) {}
-  async get(jobId: string): Promise<ExportJob | null> {
+  async get<T extends BaseJob = BaseJob>(jobId: string): Promise<T | null> {
     try {
       const { resource } = await this.container.item(jobId, jobId).read();
       if (!resource) return null;
       const { _rid, _self, _etag, _attachments, _ts, ...job } = resource;
-      return job as ExportJob;
+      return job as T;
     } catch (err: any) {
       if (err.code === 404) return null;
       throw err;
     }
   }
-  async put(job: ExportJob): Promise<void> {
+  async put<T extends BaseJob>(job: T): Promise<void> {
     await this.container.items.upsert({ ...job });
   }
   async cleanupExpired(maxAgeMs: number): Promise<void> {
@@ -121,12 +134,12 @@ class FirestoreSopStorage implements SopStorage {
 
 class FirestoreJobStore implements JobStore {
   constructor(private db: admin.firestore.Firestore) {}
-  async get(jobId: string): Promise<ExportJob | null> {
+  async get<T extends BaseJob = BaseJob>(jobId: string): Promise<T | null> {
     const doc = await this.db.collection(FIRESTORE_COLLECTION).doc(jobId).get();
     if (!doc.exists) return null;
-    return doc.data() as ExportJob;
+    return doc.data() as T;
   }
-  async put(job: ExportJob): Promise<void> {
+  async put<T extends BaseJob>(job: T): Promise<void> {
     await this.db.collection(FIRESTORE_COLLECTION).doc(job.id).set(job);
   }
   async cleanupExpired(maxAgeMs: number): Promise<void> {
@@ -330,19 +343,41 @@ If there are no more events to extract, return an empty events array with is_com
     return Array.from(secondaryMap.values());
   }
 
-  // Gemini Analysis Proxy (with cursor-based continuation loop)
-  app.post("/api/gemini/analyze", async (req, res) => {
-    const apiKey = process.env.API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "Gemini API Key is missing on server." });
-    }
+  // ============================================================================
+  // Gemini Analysis — polling-based (POST kicks off a background job, client
+  // polls the status endpoint). The synchronous version held an HTTP connection
+  // open for the full Gemini call (up to several minutes for multi-page PDFs),
+  // which conflicted with platform ingress timeouts (Container Apps' 240s
+  // Envoy default). The polling design returns in <100ms and runs Gemini in
+  // a background async function. Job state persists in the storage backend.
+  // ============================================================================
+
+  async function runAnalyzeJob(jobId: string, apiKey: string, filePart: any): Promise<void> {
+    if (!storage) return;
+    const job = await storage.jobs.get<AnalyzeJob>(jobId);
+    if (!job) return;
+
+    const log = (msg: string, extra?: object) => {
+      process.stdout.write(`[analyze jobId=${jobId}] ${msg}` + (extra ? ` ${JSON.stringify(extra)}` : '') + '\n');
+    };
+    const persist = async () => {
+      try { await storage!.jobs.put(job); }
+      catch (err: any) { process.stderr.write(`[analyze jobId=${jobId}] persist failed: ${err?.message || err}\n`); }
+    };
+    const updateProgress = async (current: number, total: number) => {
+      job.progress = { current, total };
+      job.updatedAt = Date.now();
+      await persist();
+    };
+    const fail = async (message: string) => {
+      log('FAIL', { message });
+      job.status = 'error';
+      job.errorMessage = message;
+      job.updatedAt = Date.now();
+      await persist();
+    };
 
     try {
-      const { filePart } = req.body;
-      if (!filePart) {
-        return res.status(400).json({ error: "Missing file data for analysis." });
-      }
-
       const ai = new GoogleGenAI({ apiKey });
       const model = ENV_VARS.GEMINI_MODEL;
 
@@ -365,8 +400,8 @@ If there are no more events to extract, return an empty events array with is_com
 
       while (!isComplete && pass < ENV_VARS.GEMINI_MAX_CONTINUATION_PASSES) {
         pass++;
+        await updateProgress(pass - 1, ENV_VARS.GEMINI_MAX_CONTINUATION_PASSES);
 
-        // Pass 1: just the PDF. Pass 2+: PDF + cursor-based continuation prompt
         const parts: any[] = [filePart];
         if (pass > 1) {
           parts.push({ text: buildContinuationPrompt(allEvents) });
@@ -380,19 +415,15 @@ If there are no more events to extract, return an empty events array with is_com
 
         const data = parseGeminiResponse(result.text || "");
 
-        // Accumulate new events
         const newEvents = data.events || [];
         allEvents.push(...newEvents);
         caseType = caseType || data.case_type;
 
-        // Determine if we should continue
         const finishReason = result.candidates?.[0]?.finishReason;
         const wasTruncated = finishReason === "MAX_TOKENS";
         const modelSaysIncomplete = data.is_complete === false && newEvents.length > 0;
         const noNewEvents = pass > 1 && newEvents.length === 0;
 
-        // STOP when: no new events (rock-solid), or natural completion with model confirmation
-        // CONTINUE when: truncated, or model says incomplete and still finding events
         if (noNewEvents) {
           isComplete = true;
         } else if (wasTruncated || modelSaysIncomplete) {
@@ -401,34 +432,45 @@ If there are no more events to extract, return an empty events array with is_com
           isComplete = true;
         }
 
-        console.log(`[Analyze] Pass ${pass}: ${newEvents.length} events, ` +
-          `finishReason=${finishReason}, is_complete=${data.is_complete}, ` +
-          `continuing=${!isComplete}`);
+        log(`Pass ${pass}: ${newEvents.length} events, finishReason=${finishReason}, is_complete=${data.is_complete}, continuing=${!isComplete}`);
       }
 
-      // Server-side dedup (Layer 3)
       const dedupedEvents = deduplicateEvents(allEvents);
       const dupsRemoved = allEvents.length - dedupedEvents.length;
-      console.log(`[Analyze] Complete: ${pass} pass(es), ` +
-        `${allEvents.length} raw → ${dedupedEvents.length} deduped events` +
-        (dupsRemoved > 0 ? ` (${dupsRemoved} duplicates removed)` : ''));
+      log(`Complete: ${pass} pass(es), ${allEvents.length} raw → ${dedupedEvents.length} deduped events` + (dupsRemoved > 0 ? ` (${dupsRemoved} duplicates removed)` : ''));
 
-      res.json({ case_type: caseType, events: dedupedEvents });
+      job.result = { case_type: caseType, events: dedupedEvents };
+      job.progress = { current: pass, total: pass };
+      job.status = 'complete';
+      job.updatedAt = Date.now();
+      await persist();
     } catch (error: any) {
-      console.error("Gemini Analysis Error:", error);
-      res.status(500).json({ error: error.message });
+      log(`uncaught error: ${error?.message || error}`);
+      await fail(error?.message || 'Unknown error during analysis');
     }
-  });
+  }
 
-  app.post("/api/gemini/apply-reminders", async (req, res) => {
-    const apiKey = process.env.API_KEY;
-    if (!apiKey) {
-      return res.status(500).json({ error: "Gemini API Key is missing on server." });
-    }
+  async function runApplyRemindersJob(jobId: string, apiKey: string, extractedForAI: any, sopListForAI: any): Promise<void> {
+    if (!storage) return;
+    const job = await storage.jobs.get<ApplyRemindersJob>(jobId);
+    if (!job) return;
+
+    const log = (msg: string, extra?: object) => {
+      process.stdout.write(`[apply-reminders jobId=${jobId}] ${msg}` + (extra ? ` ${JSON.stringify(extra)}` : '') + '\n');
+    };
+    const persist = async () => {
+      try { await storage!.jobs.put(job); }
+      catch (err: any) { process.stderr.write(`[apply-reminders jobId=${jobId}] persist failed: ${err?.message || err}\n`); }
+    };
+    const fail = async (message: string) => {
+      log('FAIL', { message });
+      job.status = 'error';
+      job.errorMessage = message;
+      job.updatedAt = Date.now();
+      await persist();
+    };
 
     try {
-      const { extractedForAI, sopListForAI } = req.body;
-      
       const ai = new GoogleGenAI({ apiKey });
       const model = ENV_VARS.GEMINI_MODEL;
 
@@ -439,7 +481,7 @@ If there are no more events to extract, return an empty events array with is_com
         systemInstruction: prompt,
         responseMimeType: "application/json",
         responseSchema: eventMatchingResponseSchema,
-        temperature: ENV_VARS.GEMINI_TEMPERATURE, 
+        temperature: ENV_VARS.GEMINI_TEMPERATURE,
         maxOutputTokens: 4096,
       };
 
@@ -463,11 +505,139 @@ If there are no more events to extract, return an empty events array with is_com
 
       const repairedText = jsonrepair(text);
       const resultData = JSON.parse(repairedText);
-      
-      res.json(resultData);
+
+      log(`complete: ${(resultData.matches || []).length} matches`);
+      job.result = { matches: resultData.matches || [] };
+      job.progress = { current: 1, total: 1 };
+      job.status = 'complete';
+      job.updatedAt = Date.now();
+      await persist();
     } catch (error: any) {
-      console.error("Gemini Reminders Error:", error);
-      res.status(500).json({ error: error.message });
+      log(`uncaught error: ${error?.message || error}`);
+      await fail(error?.message || 'Unknown error during reminders matching');
+    }
+  }
+
+  // POST kicks off the analyze job, returns 202 + jobId immediately.
+  app.post("/api/gemini/analyze", async (req, res) => {
+    if (!storage) return res.status(503).json({ error: "No storage backend configured." });
+
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "Gemini API Key is missing on server." });
+
+    const { filePart } = req.body;
+    if (!filePart) return res.status(400).json({ error: "Missing file data for analysis." });
+
+    const jobId = generateJobId();
+    const job: AnalyzeJob = {
+      id: jobId,
+      status: 'running',
+      progress: { current: 0, total: ENV_VARS.GEMINI_MAX_CONTINUATION_PASSES },
+      errors: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    try {
+      await storage.jobs.put(job);
+    } catch (err: any) {
+      console.error(`[analyze jobId=${jobId}] failed to create job:`, err);
+      return res.status(500).json({ error: "Failed to start analysis job." });
+    }
+
+    console.log(`[analyze jobId=${jobId}] starting`);
+
+    runAnalyzeJob(jobId, apiKey, filePart).catch(async (err: any) => {
+      process.stderr.write(`[analyze jobId=${jobId}] runAnalyzeJob threw outside try: ${err?.message || err}\n`);
+      try {
+        const j = await storage!.jobs.get<AnalyzeJob>(jobId);
+        if (j) {
+          j.status = 'error';
+          j.errorMessage = err?.message || String(err);
+          j.updatedAt = Date.now();
+          await storage!.jobs.put(j);
+        }
+      } catch { /* best effort */ }
+    });
+
+    res.status(202).json({ jobId });
+  });
+
+  app.get("/api/gemini/analyze-status/:jobId", async (req, res) => {
+    if (!storage) return res.status(503).json({ error: "No storage backend configured." });
+    try {
+      const job = await storage.jobs.get<AnalyzeJob>(req.params.jobId);
+      if (!job) return res.status(404).json({ error: "Job not found or has expired" });
+      res.json({
+        status: job.status,
+        progress: job.progress,
+        result: job.result,
+        errorMessage: job.errorMessage,
+      });
+    } catch (err: any) {
+      console.error("Error reading analyze job:", err);
+      res.status(500).json({ error: "Failed to read job status" });
+    }
+  });
+
+  // POST kicks off the apply-reminders job, returns 202 + jobId immediately.
+  app.post("/api/gemini/apply-reminders", async (req, res) => {
+    if (!storage) return res.status(503).json({ error: "No storage backend configured." });
+
+    const apiKey = process.env.API_KEY;
+    if (!apiKey) return res.status(500).json({ error: "Gemini API Key is missing on server." });
+
+    const { extractedForAI, sopListForAI } = req.body;
+
+    const jobId = generateJobId();
+    const job: ApplyRemindersJob = {
+      id: jobId,
+      status: 'running',
+      progress: { current: 0, total: 1 },
+      errors: [],
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+
+    try {
+      await storage.jobs.put(job);
+    } catch (err: any) {
+      console.error(`[apply-reminders jobId=${jobId}] failed to create job:`, err);
+      return res.status(500).json({ error: "Failed to start apply-reminders job." });
+    }
+
+    console.log(`[apply-reminders jobId=${jobId}] starting`);
+
+    runApplyRemindersJob(jobId, apiKey, extractedForAI, sopListForAI).catch(async (err: any) => {
+      process.stderr.write(`[apply-reminders jobId=${jobId}] runApplyRemindersJob threw outside try: ${err?.message || err}\n`);
+      try {
+        const j = await storage!.jobs.get<ApplyRemindersJob>(jobId);
+        if (j) {
+          j.status = 'error';
+          j.errorMessage = err?.message || String(err);
+          j.updatedAt = Date.now();
+          await storage!.jobs.put(j);
+        }
+      } catch { /* best effort */ }
+    });
+
+    res.status(202).json({ jobId });
+  });
+
+  app.get("/api/gemini/apply-reminders-status/:jobId", async (req, res) => {
+    if (!storage) return res.status(503).json({ error: "No storage backend configured." });
+    try {
+      const job = await storage.jobs.get<ApplyRemindersJob>(req.params.jobId);
+      if (!job) return res.status(404).json({ error: "Job not found or has expired" });
+      res.json({
+        status: job.status,
+        progress: job.progress,
+        result: job.result,
+        errorMessage: job.errorMessage,
+      });
+    } catch (err: any) {
+      console.error("Error reading apply-reminders job:", err);
+      res.status(500).json({ error: "Failed to read job status" });
     }
   });
 
@@ -875,7 +1045,7 @@ If there are no more events to extract, return an empty events array with is_com
     }
   ): Promise<void> {
     if (!storage) return;
-    const job = await storage.jobs.get(jobId);
+    const job = await storage.jobs.get<ExportJob>(jobId);
     if (!job) return;
 
     const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = params;
@@ -1219,7 +1389,7 @@ If there are no more events to extract, return an empty events array with is_com
     }).catch(async (err: any) => {
       process.stderr.write(`[export jobId=${jobId}] runExportJob threw outside try: ${err?.message || err}\n`);
       try {
-        const j = await storage!.jobs.get(jobId);
+        const j = await storage!.jobs.get<ExportJob>(jobId);
         if (j) {
           j.status = 'error';
           j.errorMessage = err?.message || String(err);
@@ -1237,7 +1407,7 @@ If there are no more events to extract, return an empty events array with is_com
       return res.status(503).json({ error: "No storage backend configured." });
     }
     try {
-      const job = await storage.jobs.get(req.params.jobId);
+      const job = await storage.jobs.get<ExportJob>(req.params.jobId);
       if (!job) {
         return res.status(404).json({ error: "Job not found or has expired" });
       }
