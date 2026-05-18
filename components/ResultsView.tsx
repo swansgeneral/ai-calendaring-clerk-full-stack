@@ -790,12 +790,23 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
         setPdfDocument(doc); 
         setNumPages(doc.numPages);
 
-        // Check if OCR'd (has text content)
+        // Check if OCR'd. Sample multiple pages and require meaningful character
+        // density per page — a single text stamp (NYSCEF header, page number,
+        // court filing receipt) shouldn't make a scanned document look OCR'd.
         try {
-          const firstPage = await doc.getPage(1);
-          const textContent = await firstPage.getTextContent();
-          const hasText = textContent.items.length > 0;
-          setIsOcr(hasText);
+          const pagesToSample = Math.min(doc.numPages, 5);
+          let totalChars = 0;
+          for (let p = 1; p <= pagesToSample; p++) {
+            const page = await doc.getPage(p);
+            const textContent = await page.getTextContent();
+            const pageText = (textContent.items as any[]).map(it => it.str || '').join(' ').trim();
+            totalChars += pageText.length;
+          }
+          const avgCharsPerPage = totalChars / pagesToSample;
+          // Real OCR'd court orders have thousands of chars per page.
+          // Image-only scans with a stamp/header have a few dozen at most.
+          // 200 chars/page is a safe threshold that catches partial-OCR cases.
+          setIsOcr(avgCharsPerPage > 200);
         } catch (e) {
           setIsOcr(false);
         }
