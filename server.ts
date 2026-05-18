@@ -5,6 +5,7 @@ import cookieParser from "cookie-parser";
 import { WebSocketServer, WebSocket } from "ws";
 import { createServer } from "http";
 import { CosmosClient, Container } from "@azure/cosmos";
+import admin from "firebase-admin";
 import { DateTime } from "luxon";
 import { GoogleGenAI, Type } from "@google/genai";
 import { jsonrepair } from "jsonrepair";
@@ -15,29 +16,189 @@ const PORT = Number(process.env.PORT) || 3000;
 console.log(`Initializing server on port ${PORT}...`);
 console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
 
-// Initialize Cosmos DB
-const COSMOS_DATABASE = process.env.COSMOS_DATABASE || "calendaring_clerk";
-const COSMOS_CONTAINER = process.env.COSMOS_CONTAINER || "sop_data";
-const COSMOS_SOP_DOC_ID = process.env.COSMOS_SOP_DOC_ID || "main_document";
+// ============================================================================
+// Storage abstraction — dual-cloud (Cosmos DB on Azure, Firestore on GCP).
+// Selected at startup based on which credentials are present in env.
+//   - COSMOS_ENDPOINT + COSMOS_KEY  →  Azure Cosmos DB
+//   - FIREBASE_PRIVATE_KEY          →  Firebase Firestore
+//   - both set                      →  Cosmos wins, warning logged
+//   - neither set                   →  SOP and export endpoints return 503
+// ============================================================================
 
-let container: Container | null = null;
-try {
-  if (process.env.COSMOS_ENDPOINT && process.env.COSMOS_KEY) {
-    const client = new CosmosClient({
-      endpoint: process.env.COSMOS_ENDPOINT,
-      key: process.env.COSMOS_KEY,
-    });
-    container = client.database(COSMOS_DATABASE).container(COSMOS_CONTAINER);
-    console.log("✅ Cosmos DB client initialized successfully.");
-  } else {
-    console.warn("⚠️ Cosmos DB credentials missing. Database will not be initialized.");
-  }
-} catch (error) {
-  console.error("❌ Failed to initialize Cosmos DB:", error);
+const COSMOS_DATABASE = process.env.COSMOS_DATABASE || "calendaring_clerk";
+const COSMOS_CONTAINER_NAME = process.env.COSMOS_CONTAINER || "sop_data";
+const COSMOS_SOP_DOC_ID = process.env.COSMOS_SOP_DOC_ID || "main_document";
+const FIRESTORE_COLLECTION = "sop_data";
+const FIRESTORE_SOP_DOC_ID = "main_document";
+
+type SopDocument = { Reminders: any[]; "Calendar Events": any[]; [key: string]: any };
+
+interface ExportJob {
+  id: string;
+  status: 'running' | 'complete' | 'error';
+  progress: { current: number; total: number };
+  summary: { entriesCreated: number; remindersSent: number };
+  errors: string[];
+  errorMessage?: string;
+  createdAt: number;
+  updatedAt: number;
 }
+
+interface SopStorage {
+  get(): Promise<SopDocument | null>;
+  put(data: SopDocument): Promise<void>;
+}
+
+interface JobStore {
+  get(jobId: string): Promise<ExportJob | null>;
+  put(job: ExportJob): Promise<void>;
+  cleanupExpired(maxAgeMs: number): Promise<void>;
+}
+
+class CosmosSopStorage implements SopStorage {
+  constructor(private container: Container) {}
+  async get(): Promise<SopDocument | null> {
+    try {
+      const { resource } = await this.container.item(COSMOS_SOP_DOC_ID, COSMOS_SOP_DOC_ID).read();
+      if (!resource) return null;
+      const { id, _rid, _self, _etag, _attachments, _ts, ...data } = resource;
+      return data as SopDocument;
+    } catch (err: any) {
+      if (err.code === 404) return null;
+      throw err;
+    }
+  }
+  async put(data: SopDocument): Promise<void> {
+    await this.container.items.upsert({ id: COSMOS_SOP_DOC_ID, ...data });
+  }
+}
+
+class CosmosJobStore implements JobStore {
+  constructor(private container: Container) {}
+  async get(jobId: string): Promise<ExportJob | null> {
+    try {
+      const { resource } = await this.container.item(jobId, jobId).read();
+      if (!resource) return null;
+      const { _rid, _self, _etag, _attachments, _ts, ...job } = resource;
+      return job as ExportJob;
+    } catch (err: any) {
+      if (err.code === 404) return null;
+      throw err;
+    }
+  }
+  async put(job: ExportJob): Promise<void> {
+    await this.container.items.upsert({ ...job });
+  }
+  async cleanupExpired(maxAgeMs: number): Promise<void> {
+    const cutoff = Date.now() - maxAgeMs;
+    try {
+      const { resources } = await this.container.items
+        .query({
+          query: "SELECT c.id FROM c WHERE STARTSWITH(c.id, 'job_') AND c.updatedAt < @cutoff",
+          parameters: [{ name: "@cutoff", value: cutoff }],
+        })
+        .fetchAll();
+      for (const { id } of resources) {
+        await this.container.item(id, id).delete().catch(() => { /* ignore deletion races */ });
+      }
+    } catch (err) {
+      console.warn("CosmosJobStore.cleanupExpired error:", err);
+    }
+  }
+}
+
+class FirestoreSopStorage implements SopStorage {
+  constructor(private db: admin.firestore.Firestore) {}
+  async get(): Promise<SopDocument | null> {
+    const doc = await this.db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_SOP_DOC_ID).get();
+    if (!doc.exists) return null;
+    return doc.data() as SopDocument;
+  }
+  async put(data: SopDocument): Promise<void> {
+    await this.db.collection(FIRESTORE_COLLECTION).doc(FIRESTORE_SOP_DOC_ID).set(data);
+  }
+}
+
+class FirestoreJobStore implements JobStore {
+  constructor(private db: admin.firestore.Firestore) {}
+  async get(jobId: string): Promise<ExportJob | null> {
+    const doc = await this.db.collection(FIRESTORE_COLLECTION).doc(jobId).get();
+    if (!doc.exists) return null;
+    return doc.data() as ExportJob;
+  }
+  async put(job: ExportJob): Promise<void> {
+    await this.db.collection(FIRESTORE_COLLECTION).doc(job.id).set(job);
+  }
+  async cleanupExpired(maxAgeMs: number): Promise<void> {
+    const cutoff = Date.now() - maxAgeMs;
+    try {
+      const snap = await this.db.collection(FIRESTORE_COLLECTION)
+        .where("updatedAt", "<", cutoff)
+        .get();
+      const batch = this.db.batch();
+      let deletions = 0;
+      snap.docs.forEach(d => {
+        if (d.id.startsWith("job_")) {
+          batch.delete(d.ref);
+          deletions++;
+        }
+      });
+      if (deletions > 0) await batch.commit();
+    } catch (err) {
+      console.warn("FirestoreJobStore.cleanupExpired error:", err);
+    }
+  }
+}
+
+function selectStorage(): { sop: SopStorage; jobs: JobStore } | null {
+  const hasCosmos = !!(process.env.COSMOS_ENDPOINT && process.env.COSMOS_KEY);
+  const hasFirestore = !!process.env.FIREBASE_PRIVATE_KEY;
+
+  if (hasCosmos && hasFirestore) {
+    console.warn("⚠️ Both COSMOS_* and FIREBASE_PRIVATE_KEY credentials present. Using Cosmos DB.");
+  }
+
+  if (hasCosmos) {
+    try {
+      const client = new CosmosClient({
+        endpoint: process.env.COSMOS_ENDPOINT!,
+        key: process.env.COSMOS_KEY!,
+      });
+      const container = client.database(COSMOS_DATABASE).container(COSMOS_CONTAINER_NAME);
+      console.log("✅ Storage backend: Azure Cosmos DB");
+      return { sop: new CosmosSopStorage(container), jobs: new CosmosJobStore(container) };
+    } catch (err) {
+      console.error("❌ Failed to initialize Cosmos DB:", err);
+      return null;
+    }
+  }
+
+  if (hasFirestore) {
+    try {
+      const serviceAccount = JSON.parse(process.env.FIREBASE_PRIVATE_KEY!);
+      admin.initializeApp({ credential: admin.credential.cert(serviceAccount) });
+      const db = admin.firestore();
+      console.log("✅ Storage backend: Firebase Firestore");
+      return { sop: new FirestoreSopStorage(db), jobs: new FirestoreJobStore(db) };
+    } catch (err) {
+      console.error("❌ Failed to initialize Firestore:", err);
+      return null;
+    }
+  }
+
+  console.warn("⚠️ No storage backend configured. SOP and export endpoints will return 503.");
+  return null;
+}
+
+const storage = selectStorage();
 
 async function startServer() {
   const app = express();
+  // Trust the platform ingress so req.protocol / req.secure reflect the original
+  // HTTPS request. Both Cloud Run and Container Apps terminate HTTPS at ingress
+  // and forward HTTP to the container — without this, anything that inspects
+  // req.secure would think the connection is plain HTTP.
+  app.set('trust proxy', 1);
   const server = createServer(app);
   
   // Initialize WebSocket Server
@@ -376,33 +537,15 @@ If there are no more events to extract, return an empty events array with is_com
   });
 
   app.get("/api/sop-data", async (req, res) => {
+    if (!storage) {
+      return res.status(503).json({ error: "No storage backend configured. Set COSMOS_* or FIREBASE_PRIVATE_KEY env vars." });
+    }
     try {
-      if (!container) {
-        return res.status(500).json({ error: "Database not initialized" });
-      }
-      try {
-        const { resource } = await container
-          .item(COSMOS_SOP_DOC_ID, COSMOS_SOP_DOC_ID)
-          .read();
-        if (resource) {
-          const { id, _rid, _self, _etag, _attachments, _ts, ...data } = resource;
-          res.json([data]);
-        } else {
-          console.log("Cosmos document not found, returning empty default.");
-          res.json([{
-            "Reminders": [],
-            "Calendar Events": []
-          }]);
-        }
-      } catch (err: any) {
-        if (err.code === 404) {
-          console.log("Cosmos document not found, returning empty default.");
-          return res.json([{
-            "Reminders": [],
-            "Calendar Events": []
-          }]);
-        }
-        throw err;
+      const data = await storage.sop.get();
+      if (data) {
+        res.json([data]);
+      } else {
+        res.json([{ "Reminders": [], "Calendar Events": [] }]);
       }
     } catch (error) {
       console.error("Error reading SOP data:", error);
@@ -411,18 +554,14 @@ If there are no more events to extract, return an empty events array with is_com
   });
 
   app.post("/api/sop-data", async (req, res) => {
+    if (!storage) {
+      return res.status(503).json({ error: "No storage backend configured." });
+    }
     try {
-      if (!container) {
-        return res.status(500).json({ error: "Database not initialized" });
-      }
-
       const newData = req.body;
       const dataToSave = Array.isArray(newData) ? newData[0] : newData;
-
-      await container.items.upsert({ id: COSMOS_SOP_DOC_ID, ...dataToSave });
-
+      await storage.sop.put(dataToSave);
       broadcast({ type: 'SOP_UPDATE', data: newData });
-
       res.json({ success: true });
     } catch (error) {
       console.error("Error writing SOP data:", error);
@@ -696,32 +835,20 @@ If there are no more events to extract, return an empty events array with is_com
   // status is 'complete' or 'error'. Plain JSON, no streaming, portable.
   // ============================================================================
 
-  type ExportJobStatus = 'running' | 'complete' | 'error';
-
-  interface ExportJob {
-    id: string;
-    status: ExportJobStatus;
-    progress: { current: number; total: number };
-    summary: { entriesCreated: number; remindersSent: number };
-    errors: string[];
-    errorMessage?: string;
-    createdAt: number;
-    updatedAt: number;
-  }
-
-  const exportJobs = new Map<string, ExportJob>();
+  // ExportJob type is defined at module scope alongside the storage abstraction.
+  // Job state persists in the configured storage backend (Cosmos or Firestore)
+  // so polling works correctly regardless of replica count / session affinity.
   const EXPORT_JOB_TTL_MS = 60 * 60 * 1000;
 
-  setInterval(() => {
-    const now = Date.now();
-    for (const [id, job] of exportJobs) {
-      if (now - job.updatedAt > EXPORT_JOB_TTL_MS) {
-        exportJobs.delete(id);
-      }
-    }
-  }, 5 * 60 * 1000).unref?.();
+  if (storage) {
+    setInterval(() => {
+      storage.jobs.cleanupExpired(EXPORT_JOB_TTL_MS).catch(err => {
+        console.warn("Job store cleanup failed:", err);
+      });
+    }, 5 * 60 * 1000).unref?.();
+  }
 
-  const generateJobId = () => Math.random().toString(36).slice(2) + Date.now().toString(36);
+  const generateJobId = () => "job_" + Math.random().toString(36).slice(2) + Date.now().toString(36);
 
   // Bare authenticated fetch to Clio — no req/res coupling. Use this inside
   // background jobs where we have an access token but no live response object.
@@ -742,7 +869,8 @@ If there are no more events to extract, return an empty events array with is_com
       timezone?: string;
     }
   ): Promise<void> {
-    const job = exportJobs.get(jobId);
+    if (!storage) return;
+    const job = await storage.jobs.get(jobId);
     if (!job) return;
 
     const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = params;
@@ -751,15 +879,21 @@ If there are no more events to extract, return an empty events array with is_com
       const line = `[export jobId=${jobId}] ${msg}` + (extra ? ` ${JSON.stringify(extra)}` : '');
       process.stdout.write(line + '\n');
     };
-    const updateProgress = (current: number) => {
+    const persist = async () => {
+      try { await storage!.jobs.put(job); }
+      catch (err: any) { process.stderr.write(`[export jobId=${jobId}] persist failed: ${err?.message || err}\n`); }
+    };
+    const updateProgress = async (current: number) => {
       job.progress.current = current;
       job.updatedAt = Date.now();
+      await persist();
     };
-    const fail = (message: string) => {
+    const fail = async (message: string) => {
       log('FAIL', { message });
       job.status = 'error';
       job.errorMessage = message;
       job.updatedAt = Date.now();
+      await persist();
     };
 
     let currentOp = 0;
@@ -815,7 +949,7 @@ If there are no more events to extract, return an empty events array with is_com
 
       // 2. Fetch Users
       currentOp++;
-      updateProgress(currentOp);
+      await updateProgress(currentOp);
 
       const usersResponse = await clioFetch(accessToken, "https://app.clio.com/api/v4/users.json?fields=id,name,subscription_type,default_calendar_id,notification_methods");
       if (usersResponse.status === 401) {
@@ -832,7 +966,7 @@ If there are no more events to extract, return an empty events array with is_com
       log('processing events', { count: events.length });
       for (const [eventIdx, event] of events.entries()) {
         currentOp++;
-        updateProgress(currentOp);
+        await updateProgress(currentOp);
         log('processing event', { eventIdx, title: event.title });
 
         try {
@@ -921,7 +1055,7 @@ If there are no more events to extract, return an empty events array with is_com
           if (event.reminders && event.reminders.length > 0) {
             for (const reminder of event.reminders) {
               currentOp++;
-              updateProgress(currentOp);
+              await updateProgress(currentOp);
 
               try {
                 const recipientIds = new Set<number>();
@@ -1023,6 +1157,7 @@ If there are no more events to extract, return an empty events array with is_com
       log('export complete', { entriesCreated: job.summary.entriesCreated, remindersSent: job.summary.remindersSent, errorCount: job.errors.length });
       job.status = 'complete';
       job.updatedAt = Date.now();
+      await persist();
     } catch (error: any) {
       process.stderr.write(`[export jobId=${jobId}] UNCAUGHT: ${error?.message || error}\n${error?.stack || ''}\n`);
       return fail(error?.message || 'Unknown error during export');
@@ -1031,6 +1166,10 @@ If there are no more events to extract, return an empty events array with is_com
 
   app.post("/api/clio/export-direct", async (req, res) => {
     const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = req.body;
+
+    if (!storage) {
+      return res.status(503).json({ error: "No storage backend configured." });
+    }
 
     if (!matterDisplayNumber) {
       return res.status(400).json({ error: "Matter Display Number is required" });
@@ -1055,7 +1194,13 @@ If there are no more events to extract, return an empty events array with is_com
       createdAt: Date.now(),
       updatedAt: Date.now(),
     };
-    exportJobs.set(jobId, job);
+
+    try {
+      await storage.jobs.put(job);
+    } catch (err: any) {
+      console.error(`[export jobId=${jobId}] failed to create job:`, err);
+      return res.status(500).json({ error: "Failed to start export job." });
+    }
 
     console.log(`[export jobId=${jobId}] starting`, JSON.stringify({ matterDisplayNumber, eventCount: events?.length || 0, totalOps }));
 
@@ -1066,31 +1211,42 @@ If there are no more events to extract, return an empty events array with is_com
       involvedAttorneys: involvedAttorneys || [],
       involvedStaff: involvedStaff || [],
       timezone,
-    }).catch((err: any) => {
+    }).catch(async (err: any) => {
       process.stderr.write(`[export jobId=${jobId}] runExportJob threw outside try: ${err?.message || err}\n`);
-      const j = exportJobs.get(jobId);
-      if (j) {
-        j.status = 'error';
-        j.errorMessage = err?.message || String(err);
-        j.updatedAt = Date.now();
-      }
+      try {
+        const j = await storage!.jobs.get(jobId);
+        if (j) {
+          j.status = 'error';
+          j.errorMessage = err?.message || String(err);
+          j.updatedAt = Date.now();
+          await storage!.jobs.put(j);
+        }
+      } catch { /* best effort */ }
     });
 
     res.status(202).json({ jobId });
   });
 
-  app.get("/api/clio/export-status/:jobId", (req, res) => {
-    const job = exportJobs.get(req.params.jobId);
-    if (!job) {
-      return res.status(404).json({ error: "Job not found or has expired" });
+  app.get("/api/clio/export-status/:jobId", async (req, res) => {
+    if (!storage) {
+      return res.status(503).json({ error: "No storage backend configured." });
     }
-    res.json({
-      status: job.status,
-      progress: job.progress,
-      summary: job.summary,
-      errors: job.errors,
-      errorMessage: job.errorMessage,
-    });
+    try {
+      const job = await storage.jobs.get(req.params.jobId);
+      if (!job) {
+        return res.status(404).json({ error: "Job not found or has expired" });
+      }
+      res.json({
+        status: job.status,
+        progress: job.progress,
+        summary: job.summary,
+        errors: job.errors,
+        errorMessage: job.errorMessage,
+      });
+    } catch (err: any) {
+      console.error("Error reading export job:", err);
+      res.status(500).json({ error: "Failed to read job status" });
+    }
   });
 
   // Vite middleware for development
