@@ -359,7 +359,7 @@ async function startServer() {
           },
         ],
         tool_choice: { type: "tool", name: "submit_extracted_events" },
-        output_config: { effort: process.env.MODEL_EFFORT_ANALYZE || ENV_VARS.MODEL_EFFORT_ANALYZE },
+        output_config: { effort: ENV_VARS.MODEL_EFFORT_ANALYZE },
         messages: [
           {
             role: "user",

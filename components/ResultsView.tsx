@@ -302,11 +302,7 @@ const PdfPage: React.FC<PdfPageProps> = ({ pageNumber, pdfDocument, events, focu
             }
           }
 
-          // 2. Fallback to Bounding Box if text search failed or not OCR'd.
-          // On non-OCR'd PDFs, Anthropic's hidden image-padding pipeline shifts Claude's
-          // coordinates unpredictably. We still use the bbox to compute an approximate
-          // scroll position (so "find in document" lands near the right area), but skip
-          // drawing the rectangle and arrow rather than mislead with a wrong-position highlight.
+          // 2. Fallback to Bounding Box (Visual Grounding) if text search failed or not OCR'd
           if (!textSearchSuccess && boundingBox && Array.isArray(boundingBox) && boundingBox.length === 4) {
             const [ymin, xmin, ymax, xmax] = boundingBox;
             const rectX = (xmin / 1000) * viewport.width;
@@ -314,14 +310,12 @@ const PdfPage: React.FC<PdfPageProps> = ({ pageNumber, pdfDocument, events, focu
             const rectW = ((xmax - xmin) / 1000) * viewport.width;
             const rectH = ((ymax - ymin) / 1000) * viewport.height;
 
-            if (isOcr) {
-              context.fillStyle = 'rgba(255, 235, 59, 0.35)';
-              context.fillRect(rectX, rectY, rectW, rectH);
-
-              context.strokeStyle = isFocused ? '#dc2626' : 'rgba(245, 158, 11, 0.2)';
-              context.lineWidth = isFocused ? 2 : 1;
-              context.strokeRect(rectX, rectY, rectW, rectH);
-            }
+            context.fillStyle = 'rgba(255, 235, 59, 0.35)';
+            context.fillRect(rectX, rectY, rectW, rectH);
+            
+            context.strokeStyle = isFocused ? '#dc2626' : 'rgba(245, 158, 11, 0.2)';
+            context.lineWidth = isFocused ? 2 : 1;
+            context.strokeRect(rectX, rectY, rectW, rectH);
 
             if (isFocused && firstFocusedMatchTop === null) {
               firstFocusedMatchTop = rectY + (rectH / 2);
@@ -388,11 +382,9 @@ const PdfPage: React.FC<PdfPageProps> = ({ pageNumber, pdfDocument, events, focu
       {highlightPosition !== null && showAllHighlights && (
          <>
            <div ref={scrollTargetRef} className="absolute left-0 w-1 h-1 pointer-events-none opacity-0" style={{ top: `${highlightPosition}%` }} />
-           {isOcr && (
-             <div className="absolute -left-10 z-10 hidden md:flex items-center justify-end w-10" style={{ top: `${highlightPosition}%`, marginTop: '-12px' }}>
-               <ArrowRight className="w-8 h-8 text-red-600 animate-pulse drop-shadow-sm" strokeWidth={3} />
-             </div>
-           )}
+           <div className="absolute -left-10 z-10 hidden md:flex items-center justify-end w-10" style={{ top: `${highlightPosition}%`, marginTop: '-12px' }}>
+             <ArrowRight className="w-8 h-8 text-red-600 animate-pulse drop-shadow-sm" strokeWidth={3} />
+           </div>
          </>
       )}
       {!isRendered && <div className="h-96 w-full bg-gray-50 flex items-center justify-center animate-pulse"><Loader2 className="animate-spin text-gray-300" /></div>}
