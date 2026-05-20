@@ -1,69 +1,70 @@
 
+import { Type } from "@google/genai";
 import { ENV_VARS } from "../env";
 
 export const responseSchema = {
-  type: "object",
+  type: Type.OBJECT,
   properties: {
     case_type: {
-      type: "string",
+      type: Type.STRING,
       enum: [...ENV_VARS.CASE_TYPES],
       description: "The final classification of the case based on specific document analysis rules."
     },
     events: {
-      type: "array",
+      type: Type.ARRAY,
       items: {
-        type: "object",
+        type: Type.OBJECT,
         properties: {
           title: {
-            type: "string",
+            type: Type.STRING,
             description: "Concise, accurate title for the event based on document text.",
           },
           start_date: {
-            type: "string",
+            type: Type.STRING,
             description: "YYYY-MM-DD format",
           },
           end_date: {
-            type: "string",
+            type: Type.STRING,
             description: "YYYY-MM-DD format. If the event is a single day, this should match start_date.",
           },
           start_time: {
-            type: "string",
+            type: Type.STRING,
             description: "HH:MM format (24h). Empty string if unknown or event is all-day.",
           },
           end_time: {
-            type: "string",
+            type: Type.STRING,
             description: "HH:MM format (24h). Empty string if unknown or event is all-day.",
           },
           is_all_day: {
-            type: "boolean",
+            type: Type.BOOLEAN,
             description: "True if no specific time is mentioned.",
           },
           location: {
-            type: "string",
+            type: Type.STRING,
             description: "Explicitly stated physical address or virtual link found in text.",
           },
           description: {
-            type: "string",
+            type: Type.STRING,
             description: "Brief context extracted from text.",
           },
           date_type: {
-            type: "string",
+            type: Type.STRING,
             enum: ["explicit", "calculated"],
             description: "Whether the date was explicitly stated or calculated from a relative rule.",
           },
           calculation_logic: {
-            type: "string",
+            type: Type.STRING,
             description: "If calculated, explain the logic (e.g. 'Event Date (Event Title) + 10 days').",
           },
           verification: {
-            type: "object",
+            type: Type.OBJECT,
             properties: {
-              quote: { type: "string", description: "The quote defining the date or the trigger rule." },
-              page: { type: "string" },
-              paragraph: { type: "string" },
-              bounding_box: {
-                type: "array",
-                items: { type: "number" },
+              quote: { type: Type.STRING, description: "The quote defining the date or the trigger rule." },
+              page: { type: Type.STRING },
+              paragraph: { type: Type.STRING },
+              bounding_box: { 
+                type: Type.ARRAY, 
+                items: { type: Type.NUMBER },
                 description: "The [ymin, xmin, ymax, xmax] coordinates of the quote on the page, normalized 0-1000. Use integers only for conciseness."
               },
             },
@@ -74,12 +75,12 @@ export const responseSchema = {
       },
     },
     is_complete: {
-      type: "boolean",
+      type: Type.BOOLEAN,
       description: "true if ALL events in the document have been extracted. false if output was truncated and events remain."
     }
   },
   required: ["case_type", "events", "is_complete"]
-} as const;
+};
 
 export const systemPrompt = `
 Role:
@@ -95,7 +96,7 @@ Primary Objectives:
    - Extract both the start_date and end_date.
    - If an event is only a single day, start_date and end_date must be the same.
 
-3. Relative/Calculated Deadlines (CRITICAL):
+3. Relative/Calculated Deadlines (CRITICAL): 
    - Identify deadlines defined relative to other events (e.g., "10 days after completion of depositions", "within 30 days of service").
    - Scan the ENTIRE document to find the "trigger" event's date (e.g., if depositions are scheduled for June 1st, then the deadline is June 11th).
    - If the trigger date is found, CALCULATE the resulting deadline date.
@@ -116,7 +117,7 @@ Primary Objectives:
    - DO NOT list the same event twice just because it's mentioned twice.
    - HOWEVER, if the same date has DIFFERENT events (e.g., "Jury Trial at 9am" and "Compliance Conference at 2pm"), you MUST extract them as separate events.
 
-6. Time Extraction: carefully look for specific times associated with dates (e.g., "at 10:00 AM", "at 2:30 PM").
+6. Time Extraction: carefully look for specific times associated with dates (e.g., "at 10:00 AM", "at 2:30 PM"). 
    - If a specific time is found, extract it in 24-hour format (HH:MM).
    - If a time range is found (e.g., "10:00 AM to 12:00 PM"), extract both start and end times.
    - If NO time is mentioned, mark the event as an "All Day" event.
@@ -126,7 +127,7 @@ Primary Objectives:
    - DO NOT INFER OR GUESS: Do not look up addresses yourself. If the document says "Courtroom 5" but does not list the street address, ONLY output "Courtroom 5" in the location.
 
 8. Verify (STRICT VERBATIM & VISUAL GROUNDING): For every date (explicit or calculated), extract the EXACT specific quote where it was found and its visual bounding box.
-   - VERBATIM REQUIREMENT: The 'quote' field MUST be a 1:1 identical match to the text in the PDF.
+   - VERBATIM REQUIREMENT: The 'quote' field MUST be a 1:1 identical match to the text in the PDF. 
    - DO NOT paraphrase, summarize, fix typos, or change capitalization in the quote.
    - The quote should be long enough to be unique on the page (usually 5-10 words).
    - BOUNDING BOX: Provide the [ymin, xmin, ymax, xmax] coordinates that tightly enclose the 'quote' on the specified 'page'.
@@ -135,11 +136,13 @@ Primary Objectives:
 
 9. Order: Return the events in the exact order they appear in the text of the document (or the order their trigger text appears).
 
-Output Style:
-- Use the \`submit_extracted_events\` tool to return your output.
-- Be EXTREMELY concise in all string fields (title, description, quote).
-- Prioritize accuracy over verbosity.
-- Set is_complete to true only if you successfully extracted every event; false if you ran out of room.
+Output Rules:
+1. You must output PURE JSON data according to the provided schema.
+2. DO NOT include any markdown formatting (no backticks \` \`, no \` \` \`json).
+3. Be EXTREMELY concise in all string fields (title, description, quote) to maximize the number of events you can fit in your response.
+4. If the document is large, prioritize accuracy over verbosity.
+5. Ensure all JSON strings are properly escaped.
+6. You MUST set is_complete to true ONLY if you have successfully output every event you identified in the document. If you could not fit all events in your response, set is_complete to false.
 `;
 
 export const getEventMatchingPrompt = (sopEventsList: string) => `
@@ -160,24 +163,24 @@ STRICT MATCHING RULES (CRITICAL):
 4. **Name & Description Check:** If the Event Names or Descriptions are significantly different, they are NOT a match.
 
 Output:
-Use the \`submit_event_matches\` tool to return your output.
+Return a JSON object containing an array of match results. 
 If an event does not have a solid match in the SOP, set 'matchedRecordId' to null.
 `;
 
 export const eventMatchingResponseSchema = {
-  type: "object",
+  type: Type.OBJECT,
   properties: {
     matches: {
-      type: "array",
+      type: Type.ARRAY,
       items: {
-        type: "object",
+        type: Type.OBJECT,
         properties: {
-          eventId: { type: "string", description: "The ID of the extracted event provided in the prompt." },
-          matchedRecordId: { type: ["string", "null"], description: "The RecordID from the SOP list if a STRICT match is found. Otherwise null." },
+          eventId: { type: Type.STRING, description: "The ID of the extracted event provided in the prompt." },
+          matchedRecordId: { type: Type.STRING, nullable: true, description: "The RecordID from the SOP list if a STRICT match is found. Otherwise null." },
         },
         required: ["eventId", "matchedRecordId"]
       }
     }
   },
   required: ["matches"]
-} as const;
+};
