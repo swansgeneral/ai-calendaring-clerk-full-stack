@@ -17,7 +17,7 @@ export const ENV_VARS = {
   DEFAULT_CASE_TYPE: "Personal Injury" as CaseType,
 
   // Gemini API Configuration
-  GEMINI_MODEL: 'gemini-3-flash-preview',
+  GEMINI_MODEL: 'gemini-3.5-flash',
   GEMINI_THINKING_LEVEL: ThinkingLevel.MEDIUM,
   GEMINI_TEMPERATURE: 0.1,
   GEMINI_MAX_OUTPUT_TOKENS: 65536,
