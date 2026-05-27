@@ -1101,7 +1101,7 @@ If there are no more events to extract, return an empty events array with is_com
     try {
       // 1. Resolve Matter
       log('looking up matter', { matterDisplayNumber });
-      const matterResponse = await clioFetch(accessToken, `https://app.clio.com/api/v4/matters.json?query=${encodeURIComponent(matterDisplayNumber)}&fields=id,display_number,client{id}`);
+      const matterResponse = await clioFetch(accessToken, `https://app.clio.com/api/v4/matters.json?query=${encodeURIComponent(matterDisplayNumber)}&fields=id,display_number,client{id,last_name}`);
 
       if (matterResponse.status === 401) {
         return fail("Clio authentication expired. Please reconnect Clio and try again.");
@@ -1118,6 +1118,7 @@ If there are no more events to extract, return an empty events array with is_com
       }
       log('matter resolved', { id: matter.id });
 
+      const clientLastName = matter.client?.last_name || "Client";
       const clientId = matter.client?.id;
 
       // 2. Fetch Users
@@ -1155,7 +1156,7 @@ If there are no more events to extract, return an empty events array with is_com
           }
           const attendees = Array.from(attendeeIds).map(id => ({ id: Number(id), type: "Calendar", _destroy: false }));
 
-          const eventTitle = event.title;
+          const eventTitle = `${clientLastName}: ${event.title}`;
           let startAt: string;
           let endAt: string;
 
@@ -1244,7 +1245,7 @@ If there are no more events to extract, return an empty events array with is_com
                 const recipients = Array.from(recipientIds);
 
                 if (reminder.type === 'Calendar Event') {
-                  const reminderTitle = reminder.calendarTitle || event.title;
+                  const reminderTitle = `${clientLastName}: ${reminder.calendarTitle || event.title}`;
                   const reminderDate = calculateReminderDate(event.start_date, reminder.quantity, reminder.unit, event.is_all_day, event.start_time, timezone);
                   const reminderDateStr = reminderDate.toISO() || "";
                   const reminderEndDateStr = reminderDate.plus({ days: 1 }).startOf('day').toISO() || "";

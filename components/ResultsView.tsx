@@ -3,7 +3,7 @@ import { Event, Calendar as CalendarType, AnalysisState, User, AnalyzedDoc } fro
 import EventCard from './EventCard';
 import React, { useEffect, useState, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
-import { Download, FileText, ArrowRight, ExternalLink, Loader2, Plus, UploadCloud, X, Check, AlertCircle, Search, ChevronUp, ChevronDown, Calendar as CalendarIcon, ArrowLeft, Table, RefreshCcw, Users, CheckSquare, Square, Sparkles, AlertTriangle, Gavel, BellOff, Eraser } from 'lucide-react';
+import { Download, FileText, ArrowRight, ExternalLink, Loader2, Plus, UploadCloud, X, Check, AlertCircle, Search, ChevronUp, ChevronDown, Calendar as CalendarIcon, ArrowLeft, Table, RefreshCcw, Users, CheckSquare, Square, Sparkles, AlertTriangle, Gavel, Info, BellOff, Eraser } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import * as pdfjsLib from 'pdfjs-dist';
 import ConfirmModal from './ConfirmModal';
@@ -103,6 +103,13 @@ const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, onSubmit, st
               disabled={isSubmitting || status === 'success'}
               className="w-full border border-gray-300 rounded-lg px-3 py-2.5 focus:ring-2 focus:ring-[#00076F] focus:border-[#00076F] outline-none shadow-sm disabled:bg-gray-100 bg-white text-gray-900"
             />
+          </div>
+
+          <div className="bg-blue-50/80 border border-blue-100 rounded-lg p-3 flex gap-2.5">
+            <Info className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" />
+            <p className="text-xs text-blue-700 leading-relaxed font-medium">
+              <span className="font-bold">Note:</span> The Prefix "[Client Last Name]:" Will be added automatically to the case title of all events when they are exported to Clio Manage.
+            </p>
           </div>
 
           {/* Progress Bar Display */}
