@@ -108,7 +108,7 @@ const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, onSubmit, st
           <div className="bg-blue-50/80 border border-blue-100 rounded-lg p-3 flex gap-2.5">
             <Info className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" />
             <p className="text-xs text-blue-700 leading-relaxed font-medium">
-              <span className="font-bold">Note:</span> The Prefix "[Client Last Name]:" Will be added automatically to the case title of all events when they are exported to Clio Manage.
+              <span className="font-bold">Note:</span> The Prefix "[Client Last Name] -" Will be added automatically to the case title of all events when they are exported to Clio Manage.
             </p>
           </div>
 

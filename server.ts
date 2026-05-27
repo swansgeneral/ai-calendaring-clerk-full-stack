@@ -1155,7 +1155,7 @@ If there are no more events to extract, return an empty events array with is_com
           }
           const attendees = Array.from(attendeeIds).map(id => ({ id: Number(id), type: "Calendar", _destroy: false }));
 
-          const eventTitle = `${clientLastName}: ${event.title}`;
+          const eventTitle = `${clientLastName} - ${event.title}`;
           let startAt: string;
           let endAt: string;
 
@@ -1244,7 +1244,7 @@ If there are no more events to extract, return an empty events array with is_com
                 const recipients = Array.from(recipientIds);
 
                 if (reminder.type === 'Calendar Event') {
-                  const reminderTitle = `${clientLastName}: ${reminder.calendarTitle || event.title}`;
+                  const reminderTitle = `${clientLastName} - ${reminder.calendarTitle || event.title}`;
                   const reminderDate = calculateReminderDate(event.start_date, reminder.quantity, reminder.unit, event.is_all_day, event.start_time, timezone);
                   const reminderDateStr = reminderDate.toISO() || "";
                   const reminderEndDateStr = reminderDate.plus({ days: 1 }).startOf('day').toISO() || "";
