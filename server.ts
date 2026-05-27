@@ -1034,7 +1034,7 @@ If there are no more events to extract, return an empty events array with is_com
     });
 
   async function runExportJob(
-    jobId: string,
+    job: ExportJob,
     accessToken: string,
     params: {
       matterDisplayNumber: string;
@@ -1045,8 +1045,7 @@ If there are no more events to extract, return an empty events array with is_com
     }
   ): Promise<void> {
     if (!storage) return;
-    const job = await storage.jobs.get<ExportJob>(jobId);
-    if (!job) return;
+    const jobId = job.id;
 
     const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = params;
 
@@ -1379,7 +1378,7 @@ If there are no more events to extract, return an empty events array with is_com
     console.log(`[export jobId=${jobId}] starting`, JSON.stringify({ matterDisplayNumber, eventCount: events?.length || 0, totalOps }));
 
     // Fire and forget — client polls /api/clio/export-status/:jobId for progress
-    runExportJob(jobId, accessToken, {
+    runExportJob(job, accessToken, {
       matterDisplayNumber,
       events: events || [],
       involvedAttorneys: involvedAttorneys || [],
