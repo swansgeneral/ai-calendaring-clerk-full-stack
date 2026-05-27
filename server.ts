@@ -352,10 +352,9 @@ If there are no more events to extract, return an empty events array with is_com
   // a background async function. Job state persists in the storage backend.
   // ============================================================================
 
-  async function runAnalyzeJob(jobId: string, apiKey: string, filePart: any): Promise<void> {
+  async function runAnalyzeJob(job: AnalyzeJob, apiKey: string, filePart: any): Promise<void> {
     if (!storage) return;
-    const job = await storage.jobs.get<AnalyzeJob>(jobId);
-    if (!job) return;
+    const jobId = job.id;
 
     const log = (msg: string, extra?: object) => {
       process.stdout.write(`[analyze jobId=${jobId}] ${msg}` + (extra ? ` ${JSON.stringify(extra)}` : '') + '\n');
@@ -450,10 +449,9 @@ If there are no more events to extract, return an empty events array with is_com
     }
   }
 
-  async function runApplyRemindersJob(jobId: string, apiKey: string, extractedForAI: any, sopListForAI: any): Promise<void> {
+  async function runApplyRemindersJob(job: ApplyRemindersJob, apiKey: string, extractedForAI: any, sopListForAI: any): Promise<void> {
     if (!storage) return;
-    const job = await storage.jobs.get<ApplyRemindersJob>(jobId);
-    if (!job) return;
+    const jobId = job.id;
 
     const log = (msg: string, extra?: object) => {
       process.stdout.write(`[apply-reminders jobId=${jobId}] ${msg}` + (extra ? ` ${JSON.stringify(extra)}` : '') + '\n');
@@ -547,7 +545,7 @@ If there are no more events to extract, return an empty events array with is_com
 
     console.log(`[analyze jobId=${jobId}] starting`);
 
-    runAnalyzeJob(jobId, apiKey, filePart).catch(async (err: any) => {
+    runAnalyzeJob(job, apiKey, filePart).catch(async (err: any) => {
       process.stderr.write(`[analyze jobId=${jobId}] runAnalyzeJob threw outside try: ${err?.message || err}\n`);
       try {
         const j = await storage!.jobs.get<AnalyzeJob>(jobId);
@@ -608,7 +606,7 @@ If there are no more events to extract, return an empty events array with is_com
 
     console.log(`[apply-reminders jobId=${jobId}] starting`);
 
-    runApplyRemindersJob(jobId, apiKey, extractedForAI, sopListForAI).catch(async (err: any) => {
+    runApplyRemindersJob(job, apiKey, extractedForAI, sopListForAI).catch(async (err: any) => {
       process.stderr.write(`[apply-reminders jobId=${jobId}] runApplyRemindersJob threw outside try: ${err?.message || err}\n`);
       try {
         const j = await storage!.jobs.get<ApplyRemindersJob>(jobId);
