@@ -1259,17 +1259,19 @@ If there are no more events to extract, return an empty events array with is_com
                 if (reminder.type === 'Calendar Event') {
                   const reminderTitle = `${clientLastName} - ${reminder.calendarTitle || event.title}`;
                   const reminderDate = calculateReminderDate(event.start_date, reminder.quantity, reminder.unit, event.is_all_day, event.start_time, timezone);
-                  const reminderDateStr = reminderDate.toISO() || "";
-                  const reminderEndDateStr = reminderDate.plus({ days: 1 }).startOf('day').toISO() || "";
+                  // Hardcoded rule: calendar-event reminders are timed 8:00–10:00 AM
+                  // entries on the reminder date, not all-day events.
+                  const reminderStartStr = reminderDate.set({ hour: 8, minute: 0, second: 0, millisecond: 0 }).toISO() || "";
+                  const reminderEndStr = reminderDate.set({ hour: 10, minute: 0, second: 0, millisecond: 0 }).toISO() || "";
 
                   const reminderCalendarPayload = {
                     data: {
                       summary: reminderTitle,
                       // Every reminder calendar event is colored "Reminder" in Outlook.
                       description: withCategoryPrefix("Reminder", reminder.calendarDescription || ""),
-                      start_at: reminderDateStr,
-                      end_at: reminderEndDateStr,
-                      all_day: true,
+                      start_at: reminderStartStr,
+                      end_at: reminderEndStr,
+                      all_day: false,
                       calendar_owner: { id: Number(event["Calendar Owner"]) },
                       matter: { id: Number(matter.id) },
                       attendees: recipients.map(id => ({ id: Number(id), type: "Calendar", _destroy: false })),
@@ -1284,7 +1286,10 @@ If there are no more events to extract, return an empty events array with is_com
                   });
 
                   if (createReminderCalResponse.ok) {
-                    job.summary.entriesCreated++;
+                    // A "Calendar Event" reminder is still a reminder, not a primary
+                    // event entry — count it under remindersSent so the post-export
+                    // summary matches its "Reminders Created" label.
+                    job.summary.remindersSent++;
                     job.updatedAt = Date.now();
                   } else {
                     const errText = await createReminderCalResponse.text().catch(() => '');

@@ -146,7 +146,7 @@ const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, onSubmit, st
                     <p className="text-xl font-bold text-slate-800">{summary.entriesCreated}</p>
                   </div>
                   <div className="bg-slate-50 p-3 rounded-lg border border-slate-100 text-center">
-                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Reminders Sent</p>
+                    <p className="text-[11px] font-bold text-slate-400 uppercase tracking-wider mb-1">Reminders Created</p>
                     <p className="text-xl font-bold text-slate-800">{summary.remindersSent}</p>
                   </div>
                 </div>
