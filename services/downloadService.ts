@@ -4,6 +4,17 @@ import { ENV_VARS } from "../env";
 /**
  * Internal helper to format 24h time to 12h AM/PM.
  */
+/**
+ * Prepends a {Category} prefix to the description, matching what the Clio export
+ * does, so an Outlook import of this file is auto-colored the same way.
+ */
+const withCategoryPrefix = (category: string | undefined, description: string): string => {
+  const name = (category || "").trim();
+  const body = description || "";
+  if (!name) return body;
+  return body ? `{${name}} ${body}` : `{${name}}`;
+};
+
 const formatTimeAMPM = (timeStr?: string): string => {
   if (!timeStr) return "";
   try {
@@ -58,7 +69,7 @@ export const exportToICS = (events: Event[]): void => {
       icsContent += `LOCATION:${event.location}\n`;
     }
     
-    icsContent += `DESCRIPTION:${(event.description || "").replace(/\n/g, '\\n')}\n`;
+    icsContent += `DESCRIPTION:${withCategoryPrefix(event.category, event.description || "").replace(/\n/g, '\\n')}\n`;
     icsContent += "END:VEVENT\n";
   });
   
@@ -84,7 +95,7 @@ export const exportToCSV = (events: Event[]): void => {
       startTime,
       endTime,
       `"${(e.location || "").replace(/"/g, '""')}"`,
-      `"${(e.description || "").replace(/"/g, '""')}"`,
+      `"${withCategoryPrefix(e.category, e.description || "").replace(/"/g, '""')}"`,
       `"${(e.verification?.quote || "").replace(/"/g, '""')}"`,
       e.verification?.page || ""
     ];

@@ -1,21 +1,24 @@
 
-import { Calendar, User, SOPEvent, SOPReminder } from "../types";
+import { Calendar, User, SOPEvent, SOPReminder, Category } from "../types";
+import { DEFAULT_CATEGORIES } from "../env";
 
 const CACHE_KEY_CALENDARS = "ai_clerk_cached_calendars";
 const CACHE_KEY_USERS = "ai_clerk_cached_users";
 
 // Global promise to deduplicate simultaneous requests
-let activeFetchPromise: Promise<{ 
-  sopEvents: SOPEvent[], 
-  sopReminders: SOPReminder[] 
+let activeFetchPromise: Promise<{
+  sopEvents: SOPEvent[],
+  sopReminders: SOPReminder[],
+  sopCategories: Category[]
 }> | null = null;
 
 /**
- * Shared internal helper to fetch the SOP data (events and reminders).
+ * Shared internal helper to fetch the SOP data (events, reminders, categories).
  */
-export const fetchAllIntegrationData = async (): Promise<{ 
-  sopEvents: SOPEvent[], 
-  sopReminders: SOPReminder[]
+export const fetchAllIntegrationData = async (): Promise<{
+  sopEvents: SOPEvent[],
+  sopReminders: SOPReminder[],
+  sopCategories: Category[]
 }> => {
   if (activeFetchPromise) return activeFetchPromise;
 
@@ -34,10 +37,20 @@ export const fetchAllIntegrationData = async (): Promise<{
             ...r,
             id: r.id || r["Reminder ID"] || `rem_${Math.random().toString(36).substr(2, 9)}`
           }));
-          
-          return { 
-            sopEvents, 
-            sopReminders
+          const rawCategories = container.Categories;
+          const sopCategories: Category[] = (Array.isArray(rawCategories) && rawCategories.length > 0)
+            ? rawCategories.map((c: any) => ({
+                id: c.id || `cat_${Math.random().toString(36).substr(2, 9)}`,
+                name: c.name || "",
+                color: c.color || "#64748B",
+                colorName: c.colorName
+              }))
+            : DEFAULT_CATEGORIES.map(c => ({ ...c }));
+
+          return {
+            sopEvents,
+            sopReminders,
+            sopCategories
           };
         }
       }
@@ -45,7 +58,7 @@ export const fetchAllIntegrationData = async (): Promise<{
       console.error("Local SOP data fetch failed:", localError);
     }
 
-    return { sopEvents: [], sopReminders: [] };
+    return { sopEvents: [], sopReminders: [], sopCategories: DEFAULT_CATEGORIES.map(c => ({ ...c })) };
   })();
 
   const result = await activeFetchPromise;
@@ -99,6 +112,7 @@ export const getUsers = async (): Promise<User[]> => {
 export const saveSOPData = async (data: {
   Reminders: SOPReminder[];
   "Calendar Events": SOPEvent[];
+  Categories?: Category[];
 }): Promise<boolean> => {
   try {
     const response = await fetch('/api/sop-data', {

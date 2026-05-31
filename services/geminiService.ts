@@ -432,8 +432,10 @@ export const applyAutoReminders = async (
       ? sopDescription
       : originalEvent.description;
 
-    // Handle Dynamic Description with {} placeholders
-    if (finalDescription.includes("{")) {
+    // Handle Dynamic Description with [] placeholders.
+    // Note: {} is reserved for category prefixes (e.g. {Deadline}), so the AI
+    // prompt delimiter is [] to avoid colliding with that.
+    if (finalDescription.includes("[")) {
       dynamicQueue.push({
         eventId: originalEvent.id,
         template: finalDescription
@@ -465,6 +467,7 @@ export const applyAutoReminders = async (
     return {
       ...originalEvent,
       sopMatchId: matchedRecordIdStr,
+      category: sopEventConfig["Category"] || originalEvent.category,
       title: finalTitle,
       description: finalDescription,
       inviteAllAttorneys: updatedInviteAttorneys || false,
@@ -502,7 +505,7 @@ export const applyAutoReminders = async (
 };
 
 /**
- * Secondary AI Pipeline to handle dynamic descriptions with {} placeholders
+ * Secondary AI Pipeline to handle dynamic descriptions with [] placeholders
  */
 async function processDynamicDescriptions(file: File, queue: { eventId: string, template: string }[]): Promise<{ eventId: string, description: string }[]> {
   const filePart = await fileToGenerativePart(file);

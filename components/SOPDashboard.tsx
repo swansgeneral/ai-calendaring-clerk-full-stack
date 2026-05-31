@@ -1,11 +1,12 @@
 import React, { useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { SOPEvent, SOPReminder } from '../types';
-import { CASE_TYPES, ENV_VARS } from '../env';
-import { 
-  Plus, Trash2, ChevronRight, ChevronDown, Clock, Bell, 
+import { SOPEvent, SOPReminder, Category } from '../types';
+import { CASE_TYPES, ENV_VARS, OUTLOOK_CATEGORY_COLORS } from '../env';
+import CategorySelect from './CategorySelect';
+import {
+  Plus, Trash2, ChevronRight, ChevronDown, Clock, Bell,
   Edit3, Mail, Calendar as CalendarIcon,
-  UserCheck, ShieldCheck, X, Search, Filter, Info, CheckCircle2, Database
+  UserCheck, ShieldCheck, X, Search, Filter, Info, CheckCircle2, Database, Tag, Palette
 } from 'lucide-react';
 
 const InfoTip: React.FC<{ text: string }> = ({ text }) => (
@@ -21,18 +22,22 @@ const InfoTip: React.FC<{ text: string }> = ({ text }) => (
 interface SOPDashboardProps {
   sopEvents: SOPEvent[];
   sopReminders: SOPReminder[];
+  sopCategories?: Category[];
   onUpdateEvents: (events: SOPEvent[]) => void;
   onUpdateReminders: (reminders: SOPReminder[]) => void;
   onUpdateAll?: (events: SOPEvent[], reminders: SOPReminder[]) => void;
+  onUpdateCategories?: (categories: Category[]) => void;
   onSave?: () => Promise<void>;
 }
 
-const SOPDashboard: React.FC<SOPDashboardProps> = ({ 
-  sopEvents, 
-  sopReminders, 
-  onUpdateEvents, 
+const SOPDashboard: React.FC<SOPDashboardProps> = ({
+  sopEvents,
+  sopReminders,
+  sopCategories = [],
+  onUpdateEvents,
   onUpdateReminders,
   onUpdateAll,
+  onUpdateCategories,
   onSave
 }) => {
   const [isSaving, setIsSaving] = useState(false);
@@ -43,6 +48,8 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
   const [filterCaseType, setFilterCaseType] = useState<string>('All');
   const [filterMinReminders, setFilterMinReminders] = useState<number | null>(null);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
+  const [isCategoryModalOpen, setIsCategoryModalOpen] = useState(false);
+  const [openColorPickerId, setOpenColorPickerId] = useState<string | null>(null);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [newEvent, setNewEvent] = useState<Partial<SOPEvent>>({
     "Event Name": "",
@@ -52,6 +59,7 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
     "Invite All Attorneys": true,
     "Invite All Staff Members": true,
     "Default Duration (Hours)": 1,
+    "Category": "",
     "Reminders": []
   });
 
@@ -76,6 +84,22 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
 
   const addEvent = () => {
     setIsAddModalOpen(true);
+  };
+
+  // --- Category management ---
+  const addCategory = () => {
+    const newId = `cat_${Math.random().toString(36).substr(2, 9)}`;
+    const firstColor = OUTLOOK_CATEGORY_COLORS[0];
+    const newCat: Category = { id: newId, name: "New Category", color: firstColor.hex, colorName: firstColor.name };
+    onUpdateCategories?.([...sopCategories, newCat]);
+  };
+
+  const updateCategory = (id: string, updates: Partial<Category>) => {
+    onUpdateCategories?.(sopCategories.map(c => c.id === id ? { ...c, ...updates } : c));
+  };
+
+  const deleteCategory = (id: string) => {
+    onUpdateCategories?.(sopCategories.filter(c => c.id !== id));
   };
 
   const handleCreateEvent = () => {
@@ -109,6 +133,7 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
       "Invite All Attorneys": newEvent["Invite All Attorneys"] ?? true,
       "Invite All Staff Members": newEvent["Invite All Staff Members"] ?? true,
       "Default Duration (Hours)": newEvent["Default Duration (Hours)"] ?? 1,
+      "Category": newEvent["Category"] || "",
       "Reminders": []
     } as SOPEvent;
     
@@ -122,6 +147,7 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
       "Invite All Attorneys": true,
       "Invite All Staff Members": true,
       "Default Duration (Hours)": 1,
+      "Category": "",
       "Reminders": []
     });
     setExpandedEventId(newId);
@@ -214,11 +240,12 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
         RecordID: trialId,
         "Event Name": "Jury Trial",
         "Case Type": ENV_VARS.DEFAULT_CASE_TYPE,
-        "Title in Calendar Event": "Jury Trial: {Case Name}",
-        "Description in Calendar Event": "Trial commencement. Ensure all exhibits are ready. {prompt}",
+        "Title in Calendar Event": "Jury Trial: [Case Name]",
+        "Description in Calendar Event": "Trial commencement. Ensure all exhibits are ready. [prompt]",
         "Invite All Attorneys": true,
         "Invite All Staff Members": true,
         "Default Duration (Hours)": 8,
+        "Category": "In Court",
         "Reminders": [`rem_trial_1_${trialId}`, `rem_trial_2_${trialId}`]
       },
       {
@@ -226,11 +253,12 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
         RecordID: depoId,
         "Event Name": "Deposition",
         "Case Type": ENV_VARS.DEFAULT_CASE_TYPE,
-        "Title in Calendar Event": "Deposition: {Deponent Name}",
-        "Description in Calendar Event": "Deposition of {Deponent Name}. Location: {Location}. {prompt}",
+        "Title in Calendar Event": "Deposition: [Deponent Name]",
+        "Description in Calendar Event": "Deposition of [Deponent Name]. Location: [Location]. [prompt]",
         "Invite All Attorneys": true,
         "Invite All Staff Members": false,
         "Default Duration (Hours)": 4,
+        "Category": "Deposition",
         "Reminders": [`rem_depo_1_${depoId}`]
       },
       {
@@ -238,11 +266,12 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
         RecordID: mediationId,
         "Event Name": "Mediation",
         "Case Type": ENV_VARS.DEFAULT_CASE_TYPE,
-        "Title in Calendar Event": "Mediation: {Case Name}",
-        "Description in Calendar Event": "Mediation session. Review settlement authority. {prompt}",
+        "Title in Calendar Event": "Mediation: [Case Name]",
+        "Description in Calendar Event": "Mediation session. Review settlement authority. [prompt]",
         "Invite All Attorneys": true,
         "Invite All Staff Members": true,
         "Default Duration (Hours)": 6,
+        "Category": "Deadline",
         "Reminders": [`rem_med_1_${mediationId}`]
       }
     ];
@@ -381,6 +410,14 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
                     Clear Filters
                   </button>
                 )}
+
+                <button
+                  onClick={() => setIsCategoryModalOpen(true)}
+                  className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-all shadow-sm hover:shadow-md font-bold text-sm whitespace-nowrap cursor-pointer"
+                >
+                  <Tag className="w-4 h-4" />
+                  Categories
+                </button>
 
                 <button
                   onClick={addEvent}
@@ -541,14 +578,14 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
                                 <div>
                                   <label className="block text-xs font-bold text-slate-500 mb-1">
                                     Description Template <span className="text-red-500">*</span>
-                                    <InfoTip text="Detailed instructions for the event. Use {prompt} to have the AI extract specific details or generate text based on the document context." />
+                                    <InfoTip text="Detailed instructions for the event. Use [prompt] (square brackets) to have the AI extract specific details or generate text based on the document context." />
                                   </label>
                                   <textarea
                                     value={event["Description in Calendar Event"] || ''}
                                     onChange={(e) => updateEvent(event.id, { "Description in Calendar Event": e.target.value })}
                                     rows={3}
                                     className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm text-slate-600 focus:ring-2 focus:ring-[#020035] focus:border-transparent outline-none transition-all resize-none"
-                                    placeholder="e.g. Schedule order for {Judge Name}."
+                                    placeholder="e.g. Schedule order for [Judge Name]."
                                   />
                                 </div>
                               </div>
@@ -569,6 +606,17 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
                                     />
                                     <span className="text-xs text-slate-500 italic">Use 24 for All Day events</span>
                                   </div>
+                                </div>
+                                <div>
+                                  <label className="block text-xs font-bold text-slate-500 mb-1">
+                                    Category
+                                    <InfoTip text="Color category applied to matched events. On export, a {Category} prefix is added to the description so Outlook auto-colors the event." />
+                                  </label>
+                                  <CategorySelect
+                                    categories={sopCategories}
+                                    value={event["Category"]}
+                                    onChange={(name) => updateEvent(event.id, { "Category": name || "" })}
+                                  />
                                 </div>
                                 <div>
                                   <label className="block text-xs font-bold text-slate-500 mb-1">
@@ -618,6 +666,17 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
                                    <p className="text-sm font-bold text-slate-900">
                                      {event["Default Duration (Hours)"] === 24 ? 'All Day (24h)' : `${event["Default Duration (Hours)"] || 'System Default'} hours`}
                                    </p>
+                                </div>
+                                <div className="mb-4">
+                                   <span className="text-xs font-bold text-slate-500 block mb-1">Category</span>
+                                   {event["Category"] ? (
+                                     <span className="inline-flex items-center gap-1.5 text-sm font-bold text-slate-900">
+                                       <span className="w-3 h-3 rounded-sm border border-black/10" style={{ backgroundColor: sopCategories.find(c => c.name === event["Category"])?.color || '#64748B' }} />
+                                       {event["Category"]}
+                                     </span>
+                                   ) : (
+                                     <p className="text-sm text-slate-400 italic">None</p>
+                                   )}
                                 </div>
                                 <h4 className="text-xs font-bold text-slate-400 mb-3">Default Invitees</h4>
                                 <div className="flex gap-4">
@@ -991,7 +1050,7 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
                     <div>
                       <label className="block text-xs font-bold text-slate-500 mb-1">
                         Description Template <span className="text-red-500">*</span>
-                        <InfoTip text="Detailed instructions for the event. Use {prompt} to have the AI extract specific details or generate text based on the document context." />
+                        <InfoTip text="Detailed instructions for the event. Use [prompt] (square brackets) to have the AI extract specific details or generate text based on the document context." />
                       </label>
                       <textarea
                         value={newEvent["Description in Calendar Event"] || ''}
@@ -999,7 +1058,18 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
                         onChange={(e) => setNewEvent(prev => ({ ...prev, "Description in Calendar Event": e.target.value }))}
                         rows={8}
                         className="w-full px-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm text-slate-600 focus:ring-2 focus:ring-[#020035] outline-none transition-all resize-none"
-                        placeholder="e.g. Schedule order for {Judge Name}."
+                        placeholder="e.g. Schedule order for [Judge Name]."
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-bold text-slate-500 mb-1">
+                        Category
+                        <InfoTip text="Color category applied to matched events. On export, a {Category} prefix is added to the description so Outlook auto-colors the event." />
+                      </label>
+                      <CategorySelect
+                        categories={sopCategories}
+                        value={newEvent["Category"]}
+                        onChange={(name) => setNewEvent(prev => ({ ...prev, "Category": name || "" }))}
                       />
                     </div>
                   </div>
@@ -1041,6 +1111,129 @@ const SOPDashboard: React.FC<SOPDashboardProps> = ({
                   className="px-8 py-2.5 bg-[#020035] text-white font-bold rounded-xl hover:bg-[#030050] transition-all active:scale-95 shadow-lg shadow-slate-200 hover:shadow-xl cursor-pointer"
                 >
                   Create Event Type
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {/* Categories Modal */}
+      <AnimatePresence>
+        {isCategoryModalOpen && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-4 overflow-hidden">
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              className="absolute inset-0 bg-slate-900/60 backdrop-blur-sm"
+              onClick={() => setIsCategoryModalOpen(false)}
+            />
+            <motion.div
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden relative z-10 flex flex-col max-h-[90vh]"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="flex items-center justify-between p-6 border-b border-slate-100 flex-shrink-0">
+                <div className="flex items-center gap-2">
+                  <Palette className="w-5 h-5 text-[#020035]" />
+                  <h3 className="text-xl font-bold text-slate-900">Categories</h3>
+                </div>
+                <button
+                  onClick={() => setIsCategoryModalOpen(false)}
+                  className="p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-all"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="p-6 overflow-y-auto custom-scrollbar flex-1 space-y-4">
+                <div className="bg-blue-50/70 border border-blue-100 rounded-xl p-3 flex gap-2.5">
+                  <Info className="w-4 h-4 text-blue-500 flex-shrink-0 mt-0.5" />
+                  <p className="text-[12px] text-blue-700 leading-relaxed">
+                    The category <span className="font-bold">name must match your Outlook category name exactly</span>. On export, a <span className="font-mono font-bold">{'{Name}'}</span> prefix is added to the event description so Outlook auto-colors it. The color here is only for display in this app.
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  {sopCategories.map(cat => (
+                    <div key={cat.id} className="flex items-center gap-3 bg-slate-50 border border-slate-200 rounded-xl p-3">
+                      <div className="relative flex-shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => setOpenColorPickerId(openColorPickerId === cat.id ? null : cat.id)}
+                          className="flex items-center gap-1.5 px-1.5 h-9 rounded-lg border border-slate-200 bg-white hover:border-slate-300 transition-all cursor-pointer"
+                          title="Pick Outlook color"
+                        >
+                          <span className="w-6 h-6 rounded-md border border-black/10" style={{ backgroundColor: cat.color }} />
+                          <ChevronDown className={`w-3.5 h-3.5 text-slate-400 transition-transform ${openColorPickerId === cat.id ? 'rotate-180' : ''}`} />
+                        </button>
+                        {openColorPickerId === cat.id && (
+                          <div className="absolute top-[calc(100%+4px)] left-0 z-[80] bg-white border border-slate-200 rounded-xl shadow-2xl p-3 w-[340px]">
+                            <p className="text-[10px] font-bold text-slate-400 uppercase tracking-wide mb-2">Outlook colors</p>
+                            <div className="grid gap-1" style={{ gridTemplateColumns: 'repeat(13, minmax(0, 1fr))' }}>
+                              {OUTLOOK_CATEGORY_COLORS.map(c => {
+                                const isSelected = cat.color === c.hex;
+                                return (
+                                  <button
+                                    key={c.name}
+                                    type="button"
+                                    title={c.name}
+                                    onClick={() => { updateCategory(cat.id, { color: c.hex, colorName: c.name }); setOpenColorPickerId(null); }}
+                                    className={`w-full aspect-square rounded border transition-all hover:scale-110 ${isSelected ? 'ring-2 ring-offset-1 ring-[#020035] border-white' : 'border-black/10'}`}
+                                    style={{ backgroundColor: c.hex }}
+                                  />
+                                );
+                              })}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <input
+                          type="text"
+                          value={cat.name}
+                          onChange={(e) => updateCategory(cat.id, { name: e.target.value })}
+                          className="w-full px-3 py-2 bg-white border border-slate-200 rounded-lg text-sm font-bold text-slate-900 focus:ring-2 focus:ring-[#020035] outline-none"
+                          placeholder="Category name (must match Outlook)"
+                        />
+                        {cat.colorName && (
+                          <span className="text-[10px] text-slate-400 ml-1">Outlook color: {cat.colorName}</span>
+                        )}
+                      </div>
+                      <button
+                        onClick={() => deleteCategory(cat.id)}
+                        className="p-2 text-slate-400 hover:text-red-600 hover:bg-red-50 rounded-lg transition-all cursor-pointer flex-shrink-0 self-start"
+                        title="Delete category"
+                      >
+                        <Trash2 className="w-4 h-4" />
+                      </button>
+                    </div>
+                  ))}
+                  {sopCategories.length === 0 && (
+                    <div className="text-center py-8 border-2 border-dashed border-slate-200 rounded-xl text-sm text-slate-400">
+                      No categories yet. Add one below.
+                    </div>
+                  )}
+                </div>
+
+                <button
+                  onClick={addCategory}
+                  className="flex items-center gap-2 px-4 py-2 bg-white border border-slate-200 text-slate-700 rounded-lg hover:bg-slate-50 transition-all font-bold text-sm cursor-pointer"
+                >
+                  <Plus className="w-4 h-4" />
+                  Add Category
+                </button>
+              </div>
+
+              <div className="p-6 border-t border-slate-100 bg-slate-50 flex justify-end flex-shrink-0">
+                <button
+                  onClick={() => setIsCategoryModalOpen(false)}
+                  className="px-8 py-2.5 bg-[#020035] text-white font-bold rounded-xl hover:bg-[#030050] transition-all active:scale-95 shadow-lg shadow-slate-200 hover:shadow-xl cursor-pointer"
+                >
+                  Done
                 </button>
               </div>
             </motion.div>

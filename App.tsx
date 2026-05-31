@@ -7,7 +7,7 @@ import ResultsView from './components/ResultsView';
 import SOPDashboard from './components/SOPDashboard';
 import { analyzeDocument, applyAutoReminders } from './services/geminiService';
 import { fetchAllIntegrationData, saveSOPData, fetchClioUsers, fetchClioCalendars, getUsers, getCalendars } from './services/webhookService';
-import { AnalyzedDoc, Event, AnalysisState, SOPEvent, SOPReminder } from './types';
+import { AnalyzedDoc, Event, AnalysisState, SOPEvent, SOPReminder, Category } from './types';
 import { AlertCircle, Database, FileSearch, CheckCircle2, Link, ChevronLeft, ChevronRight } from 'lucide-react';
 
 const App: React.FC = () => {
@@ -26,6 +26,7 @@ const App: React.FC = () => {
   const latestSopStateRef = React.useRef({
     events: analysisState.sopEvents || [],
     reminders: analysisState.sopReminders || [],
+    categories: analysisState.sopCategories || [],
     users: analysisState.availableUsers || [],
     calendars: analysisState.availableCalendars || []
   });
@@ -34,10 +35,11 @@ const App: React.FC = () => {
     latestSopStateRef.current = {
       events: analysisState.sopEvents || [],
       reminders: analysisState.sopReminders || [],
+      categories: analysisState.sopCategories || [],
       users: analysisState.availableUsers || [],
       calendars: analysisState.availableCalendars || []
     };
-  }, [analysisState.sopEvents, analysisState.sopReminders, analysisState.availableUsers, analysisState.availableCalendars]);
+  }, [analysisState.sopEvents, analysisState.sopReminders, analysisState.sopCategories, analysisState.availableUsers, analysisState.availableCalendars]);
 
   const checkClioStatus = async (retries = 3): Promise<{ authenticated: boolean; configured?: boolean }> => {
     for (let i = 0; i < retries; i++) {
@@ -72,6 +74,7 @@ const App: React.FC = () => {
         availableCalendars: prev.availableCalendars || [],
         sopEvents: sopData.sopEvents,
         sopReminders: sopData.sopReminders,
+        sopCategories: sopData.sopCategories,
       }));
       return;
     }
@@ -87,6 +90,7 @@ const App: React.FC = () => {
       availableCalendars: calendars,
       sopEvents: sopData.sopEvents,
       sopReminders: sopData.sopReminders,
+      sopCategories: sopData.sopCategories,
       defaultCalendarName: undefined
     }));
   };
@@ -152,7 +156,10 @@ const App: React.FC = () => {
                 setAnalysisState(prev => ({
                   ...prev,
                   sopEvents: container["Calendar Events"] || [],
-                  sopReminders: container.Reminders || []
+                  sopReminders: container.Reminders || [],
+                  sopCategories: (Array.isArray(container.Categories) && container.Categories.length > 0)
+                    ? container.Categories
+                    : (prev.sopCategories || [])
                 }));
               }
             }
@@ -194,7 +201,8 @@ const App: React.FC = () => {
       const state = latestSopStateRef.current;
       saveSOPData({
         Reminders: state.reminders,
-        "Calendar Events": state.events
+        "Calendar Events": state.events,
+        Categories: state.categories
       }).catch(err => console.error("Failed to save SOP on exit:", err));
     };
   }, [view]);
@@ -234,13 +242,15 @@ const App: React.FC = () => {
         availableUsers: users,
         availableCalendars: calendars,
         sopEvents: currentSopData.sopEvents,
-        sopReminders: currentSopData.sopReminders
+        sopReminders: currentSopData.sopReminders,
+        sopCategories: currentSopData.sopCategories
       }));
 
-      // Also update the local database with new users and calendars, preserving SOP events/reminders
+      // Also update the local database with new users and calendars, preserving SOP events/reminders/categories
       const success = await saveSOPData({
         Reminders: currentSopData.sopReminders,
-        "Calendar Events": currentSopData.sopEvents
+        "Calendar Events": currentSopData.sopEvents,
+        Categories: currentSopData.sopCategories
       });
       
       if (success) {
@@ -253,18 +263,20 @@ const App: React.FC = () => {
     }
   };
 
-  const handleSOPUpdate = (newEvents?: SOPEvent[], newReminders?: SOPReminder[]) => {
+  const handleSOPUpdate = (newEvents?: SOPEvent[], newReminders?: SOPReminder[], newCategories?: Category[]) => {
     setAnalysisState(prev => ({
       ...prev,
       sopEvents: newEvents !== undefined ? newEvents : (prev.sopEvents || []),
       sopReminders: newReminders !== undefined ? newReminders : (prev.sopReminders || []),
+      sopCategories: newCategories !== undefined ? newCategories : (prev.sopCategories || []),
     }));
   };
 
   const handleSaveSOP = async () => {
     const success = await saveSOPData({
       Reminders: analysisState.sopReminders || [],
-      "Calendar Events": analysisState.sopEvents || []
+      "Calendar Events": analysisState.sopEvents || [],
+      Categories: analysisState.sopCategories || []
     });
     
     if (success) {
@@ -561,12 +573,14 @@ const App: React.FC = () => {
           >
             {view === 'database' ? (
               <div className="h-[calc(100vh-4rem)]">
-                <SOPDashboard 
+                <SOPDashboard
                   sopEvents={analysisState.sopEvents || []}
                   sopReminders={analysisState.sopReminders || []}
-                  onUpdateEvents={(newEvents) => handleSOPUpdate(newEvents, undefined)}
-                  onUpdateReminders={(newReminders) => handleSOPUpdate(undefined, newReminders)}
-                  onUpdateAll={(newEvents, newReminders) => handleSOPUpdate(newEvents, newReminders)}
+                  sopCategories={analysisState.sopCategories || []}
+                  onUpdateEvents={(newEvents) => handleSOPUpdate(newEvents, undefined, undefined)}
+                  onUpdateReminders={(newReminders) => handleSOPUpdate(undefined, newReminders, undefined)}
+                  onUpdateAll={(newEvents, newReminders) => handleSOPUpdate(newEvents, newReminders, undefined)}
+                  onUpdateCategories={(newCategories) => handleSOPUpdate(undefined, undefined, newCategories)}
                   onSave={handleSaveSOP}
                 />
               </div>

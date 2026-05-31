@@ -3,8 +3,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
 import { X, Save, Trash2, Bell, FileText, Plus, Mail, Calendar as CalendarIcon, Loader2, Users, Search, CheckSquare, Square, ChevronDown, Edit2, UserPlus, ShieldAlert, ShieldCheck, Clock, RefreshCw, Gavel, Info } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Event, Reminder, Calendar as CalendarType, User } from '../types';
+import { Event, Reminder, Calendar as CalendarType, User, Category } from '../types';
 import { getUsers } from '../services/webhookService';
+import CategorySelect from './CategorySelect';
 
 interface EventEditorModalProps {
   isOpen: boolean;
@@ -16,6 +17,7 @@ interface EventEditorModalProps {
   involvedAttorneys?: string[];
   availableCalendars?: CalendarType[];
   defaultCalendarName?: string;
+  categories?: Category[];
 }
 
 const EventEditorModal: React.FC<EventEditorModalProps> = ({
@@ -27,7 +29,8 @@ const EventEditorModal: React.FC<EventEditorModalProps> = ({
   involvedStaff = [],
   involvedAttorneys = [],
   availableCalendars = [],
-  defaultCalendarName = ''
+  defaultCalendarName = '',
+  categories = []
 }) => {
   const [activeTab, setActiveTab] = useState<'details' | 'calendar' | 'reminders'>('details');
   const [editForm, setEditForm] = useState<Event>(event);
@@ -428,13 +431,31 @@ const EventEditorModal: React.FC<EventEditorModalProps> = ({
                   </div>
 
                   <div>
+                    <label className="block text-xs font-bold text-gray-600 mb-1">Category</label>
+                    <CategorySelect
+                      categories={categories}
+                      value={editForm.category}
+                      onChange={(name) => setEditForm({ ...editForm, category: name })}
+                    />
+                  </div>
+
+                  <div>
                     <label className="block text-xs font-bold text-gray-600 mb-1">Description / Context</label>
-                    <textarea 
+                    {editForm.category && (
+                      <div className="flex items-center gap-2 mb-1.5 px-2.5 py-1.5 bg-slate-100 border border-slate-200 rounded-lg select-none">
+                        <span className="text-[11px] font-mono font-bold text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded">{`{${editForm.category}}`}</span>
+                        <span className="text-[11px] text-slate-400 italic">auto-added prefix, not editable</span>
+                      </div>
+                    )}
+                    <textarea
                       rows={3}
                       value={editForm.description || ''}
                       onChange={(e) => setEditForm({ ...editForm, description: e.target.value })}
                       className="w-full text-sm border-gray-300 rounded-lg border p-2.5 bg-slate-50/50 text-gray-900 font-medium"
                     />
+                    <p className="mt-1.5 text-[11px] text-slate-400 leading-relaxed">
+                      If you see a <span className="font-mono font-bold text-slate-500">{'{Deadline}'}</span> or <span className="font-mono font-bold text-slate-500">{'{Reminder}'}</span> prefix, that is how we auto-color this event in Outlook once it syncs from Clio. It is added automatically and is not part of the editable text.
+                    </p>
                   </div>
                 </form>
               )}

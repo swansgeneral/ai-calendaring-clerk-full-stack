@@ -1153,6 +1153,7 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
                   involvedAttorneys={analysisState.involvedAttorneys}
                   availableCalendars={analysisState.availableCalendars || []}
                   defaultCalendarName={analysisState.defaultCalendarName}
+                  categories={analysisState.sopCategories || []}
                 />
               </motion.div>
             ))}

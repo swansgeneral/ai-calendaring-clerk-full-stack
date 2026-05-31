@@ -1,7 +1,7 @@
 
 import React, { useState } from 'react';
 import { ChevronDown, ChevronUp, BookOpen, Search, Edit2, Clock, MapPin, Calculator, Info, Trash2, Bell, Users, Gavel, CheckCircle } from 'lucide-react';
-import { Event, Reminder, Calendar as CalendarType } from '../types';
+import { Event, Reminder, Calendar as CalendarType, Category } from '../types';
 import EventEditorModal from './EventEditorModal';
 import ConfirmModal from './ConfirmModal';
 import { motion, AnimatePresence } from 'framer-motion';
@@ -17,6 +17,7 @@ interface EventCardProps {
   involvedAttorneys?: string[];
   availableCalendars?: CalendarType[];
   defaultCalendarName?: string;
+  categories?: Category[];
 }
 
 const EventCard: React.FC<EventCardProps> = ({ 
@@ -29,7 +30,8 @@ const EventCard: React.FC<EventCardProps> = ({
     involvedStaff = [],
     involvedAttorneys = [],
     availableCalendars = [],
-    defaultCalendarName = ''
+    defaultCalendarName = '',
+    categories = []
 }) => {
   const [isEditorOpen, setIsEditorOpen] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -121,6 +123,7 @@ const EventCard: React.FC<EventCardProps> = ({
         involvedAttorneys={involvedAttorneys}
         availableCalendars={availableCalendars}
         defaultCalendarName={defaultCalendarName}
+        categories={categories}
       />
 
       <ConfirmModal 
@@ -162,6 +165,16 @@ const EventCard: React.FC<EventCardProps> = ({
           <div className="flex-1 min-w-0">
             <div className="flex items-center justify-between mb-1 gap-3">
               <div className="flex items-center gap-2 min-w-0">
+                {event.category && (() => {
+                  const cat = categories.find(c => c.name === event.category);
+                  return (
+                    <span
+                      className="w-3 h-3 rounded-sm flex-shrink-0 border border-black/10"
+                      style={{ backgroundColor: cat?.color || '#64748B' }}
+                      title={`Category: ${event.category}`}
+                    />
+                  );
+                })()}
                 <h3 className={`text-lg font-semibold truncate ${event.selected ? 'text-gray-900' : 'text-gray-500 line-through decoration-gray-400'}`}>
                     {event.title}
                 </h3>

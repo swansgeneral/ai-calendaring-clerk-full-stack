@@ -10,7 +10,7 @@ import { DateTime } from "luxon";
 import { GoogleGenAI, Type } from "@google/genai";
 import { jsonrepair } from "jsonrepair";
 import { systemPrompt, responseSchema, getEventMatchingPrompt, eventMatchingResponseSchema } from "./prompts/systemPrompt";
-import { ENV_VARS } from "./env";
+import { ENV_VARS, DEFAULT_CATEGORIES } from "./env";
 
 const PORT = Number(process.env.PORT) || 3000;
 console.log(`Initializing server on port ${PORT}...`);
@@ -31,7 +31,7 @@ const COSMOS_SOP_DOC_ID = process.env.COSMOS_SOP_DOC_ID || "main_document";
 const FIRESTORE_COLLECTION = "sop_data";
 const FIRESTORE_SOP_DOC_ID = "main_document";
 
-type SopDocument = { Reminders: any[]; "Calendar Events": any[]; [key: string]: any };
+type SopDocument = { Reminders: any[]; "Calendar Events": any[]; Categories?: any[]; [key: string]: any };
 
 type JobStatus = 'running' | 'complete' | 'error';
 
@@ -651,7 +651,7 @@ If there are no more events to extract, return an empty events array with is_com
       const ai = new GoogleGenAI({ apiKey });
       const model = ENV_VARS.GEMINI_MODEL;
 
-      const systemInstruction = "You are a Legal Assistant. Read the document. For each Event ID and Template provided, fill in the placeholders indicated by {prompt} with specific details found in the document. Return the full description with the placeholders replaced by the extracted information. If information for a placeholder is not found, replace it with 'Information not found'. Keep the text outside the curly braces exactly as it is in the template.";
+      const systemInstruction = "You are a Legal Assistant. Read the document. For each Event ID and Template provided, fill in the placeholders indicated by square brackets, e.g. [prompt], with specific details found in the document. Return the full description with the placeholders (including the square brackets) replaced by the extracted information. If information for a placeholder is not found, replace it with 'Information not found'. Keep the text outside the square brackets exactly as it is in the template.";
       
       const responseSchema = {
         type: Type.OBJECT,
@@ -716,9 +716,13 @@ If there are no more events to extract, return an empty events array with is_com
     try {
       const data = await storage.sop.get();
       if (data) {
+        // Seed default categories for firms whose SOP doc predates the feature.
+        if (!Array.isArray(data.Categories) || data.Categories.length === 0) {
+          data.Categories = DEFAULT_CATEGORIES.map(c => ({ ...c }));
+        }
         res.json([data]);
       } else {
-        res.json([{ "Reminders": [], "Calendar Events": [] }]);
+        res.json([{ "Reminders": [], "Calendar Events": [], "Categories": DEFAULT_CATEGORIES.map(c => ({ ...c })) }]);
       }
     } catch (error) {
       console.error("Error reading SOP data:", error);
@@ -1074,6 +1078,14 @@ If there are no more events to extract, return an empty events array with is_com
       if (!t) return "00:00:00";
       return t.split(':').length === 2 ? `${t}:00` : t;
     };
+    // Prepends a {Category} prefix to the description. An Outlook automation reads
+    // this prefix (once the Clio event syncs to Outlook) to auto-color the event.
+    const withCategoryPrefix = (category: string | undefined, description: string) => {
+      const name = (category || "").trim();
+      const body = description || "";
+      if (!name) return body;
+      return body ? `{${name}} ${body}` : `{${name}}`;
+    };
     const adjustForWeekend = (date: DateTime) => {
       let d = date;
       const day = d.weekday;
@@ -1159,14 +1171,15 @@ If there are no more events to extract, return an empty events array with is_com
           let startAt: string;
           let endAt: string;
 
+          const endDate = event.end_date || event.start_date;
           if (event.is_all_day) {
             startAt = DateTime.fromISO(event.start_date, { zone: timezone || "UTC" }).startOf('day').toISO() || "";
-            endAt = DateTime.fromISO(event.end_date, { zone: timezone || "UTC" }).plus({ days: 1 }).startOf('day').toISO() || "";
+            endAt = DateTime.fromISO(endDate, { zone: timezone || "UTC" }).plus({ days: 1 }).startOf('day').toISO() || "";
           } else {
             const startTimeStr = ensureSeconds(event.start_time || '09:00:00');
             const endTimeStr = ensureSeconds(event.end_time || '10:00:00');
             startAt = DateTime.fromISO(`${event.start_date}T${startTimeStr}`, { zone: timezone || "UTC" }).toISO() || "";
-            endAt = DateTime.fromISO(`${event.end_date}T${endTimeStr}`, { zone: timezone || "UTC" }).toISO() || "";
+            endAt = DateTime.fromISO(`${endDate}T${endTimeStr}`, { zone: timezone || "UTC" }).toISO() || "";
           }
 
           const calendarOwnerId = Number(event["Calendar Owner"]);
@@ -1179,7 +1192,7 @@ If there are no more events to extract, return an empty events array with is_com
           const calendarEntryPayload = {
             data: {
               summary: eventTitle,
-              description: event.description || "",
+              description: withCategoryPrefix(event.category, event.description || ""),
               location: event.location || "",
               start_at: startAt,
               end_at: endAt,
@@ -1252,7 +1265,8 @@ If there are no more events to extract, return an empty events array with is_com
                   const reminderCalendarPayload = {
                     data: {
                       summary: reminderTitle,
-                      description: reminder.calendarDescription || "",
+                      // Every reminder calendar event is colored "Reminder" in Outlook.
+                      description: withCategoryPrefix("Reminder", reminder.calendarDescription || ""),
                       start_at: reminderDateStr,
                       end_at: reminderEndDateStr,
                       all_day: true,

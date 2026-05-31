@@ -8,6 +8,16 @@ export interface VerificationData {
   boundingBox?: [number, number, number, number]; // [ymin, xmin, ymax, xmax] normalized 0-1000
 }
 
+// Mirrors Outlook calendar categories. The `name` must byte-match the Outlook
+// category name, because exported events get a `{name}` prefix in their
+// description that a downstream Outlook automation reads to auto-color the event.
+export interface Category {
+  id: string;
+  name: string;
+  color: string; // hex, used for the swatch in the UI only
+  colorName?: string; // Outlook color family (e.g. "Cranberry"), shown as a label
+}
+
 export interface Reminder {
   id: string;
   type: 'Email' | 'Calendar Event';
@@ -44,6 +54,7 @@ export interface Event {
   manualInvitees: string[]; 
   inviteClient?: boolean;
   sopMatchId?: string;
+  category?: string; // Category name; rendered as a locked {category} prefix and composed into the description at export.
 }
 
 export interface User {
@@ -72,6 +83,7 @@ export interface SOPEvent {
   "Invite All Attorneys"?: boolean | null;
   "Invite All Staff Members"?: boolean | null;
   "Default Duration (Hours)"?: number | null;
+  "Category"?: string; // Default category name applied to matched events of this type.
 }
 
 export interface SOPReminder {
@@ -98,6 +110,7 @@ export interface AnalysisState {
   // New Structured SOP Data
   sopEvents?: SOPEvent[];
   sopReminders?: SOPReminder[];
+  sopCategories?: Category[];
   
   availableUsers?: User[];
   availableCalendars?: Calendar[];
