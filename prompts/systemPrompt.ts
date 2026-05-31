@@ -29,11 +29,11 @@ export const responseSchema = {
           },
           start_time: {
             type: Type.STRING,
-            description: "HH:MM format (24h). Empty string if unknown or event is all-day.",
+            description: "Zero-padded 24-hour time like \"09:00\" or \"14:30\". Empty string if no time is stated or the event is all-day.",
           },
           end_time: {
             type: Type.STRING,
-            description: "HH:MM format (24h). Empty string if unknown or event is all-day.",
+            description: "Zero-padded 24-hour time like \"09:00\" or \"14:30\". Empty string if no time is stated or the event is all-day.",
           },
           is_all_day: {
             type: Type.BOOLEAN,

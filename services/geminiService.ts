@@ -88,6 +88,23 @@ const normalizeStringArray = (input: any): string[] => {
   return [String(input)];
 };
 
+/**
+ * Coerce a model-supplied time into a valid 24h "HH:MM" string.
+ * Gemini occasionally leaks the schema's own hint into the value (e.g.
+ * "10:0024h format"), which breaks the time display, the editor's time input,
+ * and the Clio export (invalid ISO -> empty start_at -> rejected entry).
+ * We recover the leading HH:MM when present, otherwise return "".
+ */
+const sanitizeTime = (input: any): string => {
+  if (!input) return "";
+  const m = String(input).trim().match(/^(\d{1,2}):(\d{2})/);
+  if (!m) return "";
+  const h = parseInt(m[1], 10);
+  const min = parseInt(m[2], 10);
+  if (h > 23 || min > 59) return "";
+  return `${String(h).padStart(2, '0')}:${String(min).padStart(2, '0')}`;
+};
+
 export const analyzeDocument = async (
   file: File, 
   onProgress?: (progress: { current: number, total: number, phase: string }) => void
@@ -204,8 +221,8 @@ export const analyzeDocument = async (
   const processedEvents = finalEventsList.map((e, idx) => {
     let startDate = e.start_date;
     let endDate = e.end_date || e.start_date;
-    let startTime = e.start_time || "";
-    let endTime = e.end_time || "";
+    let startTime = sanitizeTime(e.start_time);
+    let endTime = sanitizeTime(e.end_time);
 
     if (!e.is_all_day) {
         if (startTime && (!endTime || startTime === endTime)) {
