@@ -1,6 +1,5 @@
 
 // New System
-import { ThinkingLevel } from "@google/genai";
 
 /**
  * This file serves as a central hub for application configuration.
@@ -71,8 +70,10 @@ export const ENV_VARS = {
   DEFAULT_CASE_TYPE: "Personal Injury" as CaseType,
 
   // Gemini API Configuration
-  GEMINI_MODEL: 'gemini-3.5-flash',
-  GEMINI_THINKING_LEVEL: ThinkingLevel.MEDIUM,
+  GEMINI_MODEL: 'gemini-2.5-flash',
+  // gemini-2.5-flash uses thinkingBudget (token budget), NOT thinkingLevel (3.x only).
+  // -1 = dynamic thinking: model picks the budget by request complexity. 0 disables.
+  GEMINI_THINKING_BUDGET: -1,
   GEMINI_TEMPERATURE: 0.1,
   GEMINI_MAX_OUTPUT_TOKENS: 65536,
   GEMINI_MAX_CONTINUATION_PASSES: 10,

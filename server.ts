@@ -258,6 +258,32 @@ async function startServer() {
 
   // --- Helpers for multi-pass analysis ---
 
+  // Gemini regularly returns transient errors: 503 (UNAVAILABLE / "high demand"),
+  // 429 (rate limit) and 500. These almost always clear within a second or two,
+  // so retry with bounded exponential backoff instead of failing the whole job
+  // (and surfacing a raw 503 to the user) on the first hiccup.
+  async function generateContentWithRetry(ai: GoogleGenAI, params: any, label: string): Promise<any> {
+    const MAX_ATTEMPTS = 4;
+    let lastErr: any;
+    for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+      try {
+        return await ai.models.generateContent(params);
+      } catch (err: any) {
+        lastErr = err;
+        const status = err?.status ?? err?.code ?? err?.error?.code;
+        const msg = String(err?.message || '');
+        const retryable =
+          status === 503 || status === 429 || status === 500 ||
+          /\b(503|429|500)\b|UNAVAILABLE|high demand|overloaded|RESOURCE_EXHAUSTED|rate limit/i.test(msg);
+        if (!retryable || attempt === MAX_ATTEMPTS) throw err;
+        const delayMs = Math.min(1000 * 2 ** (attempt - 1), 8000) + Math.floor(Math.random() * 250);
+        process.stdout.write(`[gemini ${label}] attempt ${attempt}/${MAX_ATTEMPTS} failed (${status ?? 'unknown'}), retrying in ${delayMs}ms\n`);
+        await new Promise(r => setTimeout(r, delayMs));
+      }
+    }
+    throw lastErr;
+  }
+
   function parseGeminiResponse(text: string): any {
     let cleaned = text.trim();
     if (cleaned.startsWith("```json")) {
@@ -388,8 +414,8 @@ If there are no more events to extract, return an empty events array with is_com
         maxOutputTokens: ENV_VARS.GEMINI_MAX_OUTPUT_TOKENS,
       };
 
-      if ((ENV_VARS as any).GEMINI_THINKING_LEVEL) {
-        config.thinkingConfig = { thinkingLevel: (ENV_VARS as any).GEMINI_THINKING_LEVEL };
+      if (typeof (ENV_VARS as any).GEMINI_THINKING_BUDGET === 'number') {
+        config.thinkingConfig = { thinkingBudget: (ENV_VARS as any).GEMINI_THINKING_BUDGET };
       }
 
       let allEvents: any[] = [];
@@ -406,11 +432,11 @@ If there are no more events to extract, return an empty events array with is_com
           parts.push({ text: buildContinuationPrompt(allEvents) });
         }
 
-        const result = await ai.models.generateContent({
+        const result = await generateContentWithRetry(ai, {
           model,
           contents: { parts },
           config,
-        });
+        }, `analyze pass ${pass}`);
 
         const data = parseGeminiResponse(result.text || "");
 
@@ -483,15 +509,15 @@ If there are no more events to extract, return an empty events array with is_com
         maxOutputTokens: 4096,
       };
 
-      if ((ENV_VARS as any).GEMINI_THINKING_LEVEL) {
-        config.thinkingConfig = { thinkingLevel: (ENV_VARS as any).GEMINI_THINKING_LEVEL };
+      if (typeof (ENV_VARS as any).GEMINI_THINKING_BUDGET === 'number') {
+        config.thinkingConfig = { thinkingBudget: (ENV_VARS as any).GEMINI_THINKING_BUDGET };
       }
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentWithRetry(ai, {
         model,
         contents: userContent,
         config,
-      });
+      }, 'apply-reminders');
 
       let text = response.text || "";
       text = text.trim();
@@ -681,15 +707,15 @@ If there are no more events to extract, return an empty events array with is_com
         maxOutputTokens: 4096,
       };
 
-      if ((ENV_VARS as any).GEMINI_THINKING_LEVEL) {
-        config.thinkingConfig = { thinkingLevel: (ENV_VARS as any).GEMINI_THINKING_LEVEL };
+      if (typeof (ENV_VARS as any).GEMINI_THINKING_BUDGET === 'number') {
+        config.thinkingConfig = { thinkingBudget: (ENV_VARS as any).GEMINI_THINKING_BUDGET };
       }
 
-      const response = await ai.models.generateContent({
+      const response = await generateContentWithRetry(ai, {
         model,
         contents: { parts: [filePart, { text: userPrompt }] },
         config,
-      });
+      }, 'dynamic-descriptions');
 
       let text = response.text || "";
       text = text.trim();
