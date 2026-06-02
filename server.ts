@@ -1198,12 +1198,15 @@ If there are no more events to extract, return an empty events array with is_com
           let endAt: string;
 
           const endDate = event.end_date || event.start_date;
-          if (event.is_all_day) {
+          // A timed event missing a start or end time would break the Clio API.
+          // Fall back to an all-day event so it always syncs cleanly.
+          const treatAsAllDay = event.is_all_day || !event.start_time || !event.end_time;
+          if (treatAsAllDay) {
             startAt = DateTime.fromISO(event.start_date, { zone: timezone || "UTC" }).startOf('day').toISO() || "";
             endAt = DateTime.fromISO(endDate, { zone: timezone || "UTC" }).plus({ days: 1 }).startOf('day').toISO() || "";
           } else {
-            const startTimeStr = ensureSeconds(event.start_time || '09:00:00');
-            const endTimeStr = ensureSeconds(event.end_time || '10:00:00');
+            const startTimeStr = ensureSeconds(event.start_time);
+            const endTimeStr = ensureSeconds(event.end_time);
             startAt = DateTime.fromISO(`${event.start_date}T${startTimeStr}`, { zone: timezone || "UTC" }).toISO() || "";
             endAt = DateTime.fromISO(`${endDate}T${endTimeStr}`, { zone: timezone || "UTC" }).toISO() || "";
           }
@@ -1222,7 +1225,7 @@ If there are no more events to extract, return an empty events array with is_com
               location: event.location || "",
               start_at: startAt,
               end_at: endAt,
-              all_day: event.is_all_day,
+              all_day: treatAsAllDay,
               calendar_owner: { id: calendarOwnerId },
               matter: { id: matterId },
               attendees: attendees,

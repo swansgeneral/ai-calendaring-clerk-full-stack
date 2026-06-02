@@ -118,7 +118,15 @@ const EventEditorModal: React.FC<EventEditorModalProps> = ({
     return () => document.removeEventListener("mousedown", handleClickOutside);
   }, []);
 
+  // A timed event (not all-day) must have both a start and end time, otherwise
+  // it breaks the Clio API. Block the save and send the user back to fix it.
+  const isMissingRequiredTimes = !editForm.is_all_day && (!editForm.start_time || !editForm.end_time);
+
   const handleGlobalSave = () => {
+    if (isMissingRequiredTimes) {
+      setActiveTab('details');
+      return;
+    }
     const finalEvent = {
       ...editForm,
       targetCalendar: useDefaultCalendar ? defaultCalendarName : (editForm.targetCalendar || (availableCalendars[0]?.name || '')),
@@ -879,19 +887,32 @@ const EventEditorModal: React.FC<EventEditorModalProps> = ({
         </div>
 
         <div className="bg-slate-50 px-6 py-4 flex justify-between flex-shrink-0 border-t border-gray-200">
-          <div className="text-[11px] text-gray-400 flex items-center italic">
-            All changes auto-save when editing details or reminders
+          <div className="text-[11px] flex items-center">
+            {isMissingRequiredTimes ? (
+              <span className="text-red-600 font-bold flex items-center gap-1.5">
+                <ShieldAlert className="w-3.5 h-3.5" />
+                Add a start and end time, or mark this as an all-day event, to save.
+              </span>
+            ) : (
+              <span className="text-gray-400 italic">All changes auto-save when editing details or reminders</span>
+            )}
           </div>
           <div className="flex gap-3">
-            <button 
+            <button
               onClick={onClose}
               className="px-5 py-2.5 bg-white border border-gray-300 text-gray-700 font-bold text-xs uppercase tracking-widest rounded-lg hover:bg-gray-100 transition-all cursor-pointer shadow-sm"
             >
               Cancel
             </button>
-            <button 
+            <button
               onClick={handleGlobalSave}
-              className="px-6 py-2.5 bg-[#00076F] text-white font-bold text-xs uppercase tracking-widest rounded-lg hover:bg-[#00076F]/90 transition-all active:scale-95 shadow-lg hover:shadow-xl flex items-center gap-2 cursor-pointer"
+              disabled={isMissingRequiredTimes}
+              title={isMissingRequiredTimes ? "Add a start and end time, or mark this as an all-day event." : undefined}
+              className={`px-6 py-2.5 font-bold text-xs uppercase tracking-widest rounded-lg transition-all flex items-center gap-2 ${
+                isMissingRequiredTimes
+                  ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none'
+                  : 'bg-[#00076F] text-white hover:bg-[#00076F]/90 active:scale-95 shadow-lg hover:shadow-xl cursor-pointer'
+              }`}
             >
               <Save className="w-4 h-4" /> Save Changes
             </button>
