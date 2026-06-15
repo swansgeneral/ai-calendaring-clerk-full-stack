@@ -224,25 +224,29 @@ export const analyzeDocument = async (
     let startTime = sanitizeTime(e.start_time);
     let endTime = sanitizeTime(e.end_time);
 
-    if (!e.is_all_day) {
-        if (startTime && (!endTime || startTime === endTime)) {
-            const offset = offsetDateTime(startDate, startTime, ENV_VARS.DEFAULT_EVENT_DURATION_MINUTES);
-            endTime = offset.time;
-            endDate = offset.date;
-        } else if (!startTime && endTime) {
-            const offset = offsetDateTime(endDate, endTime, -ENV_VARS.DEFAULT_EVENT_DURATION_MINUTES);
-            startTime = offset.time;
-            startDate = offset.date;
-        } else if (!startTime && !endTime) {
-            const offset = offsetDateTime(startDate, ENV_VARS.DEFAULT_EVENT_START_TIME, ENV_VARS.DEFAULT_EVENT_DURATION_MINUTES);
-            startTime = ENV_VARS.DEFAULT_EVENT_START_TIME;
-            endTime = offset.time;
-            endDate = offset.date;
-        }
+    // Main events are always timed. If the document states a time we keep it,
+    // filling the missing side with the default duration. If no time is stated
+    // we default to a 2h, 8:00 to 10:00 AM block, mirroring the reminder rule,
+    // rather than an all-day entry. A firm SOP can still force an all-day entry
+    // downstream (Default Duration = 24h).
+    if (startTime && (!endTime || startTime === endTime)) {
+        const offset = offsetDateTime(startDate, startTime, ENV_VARS.DEFAULT_EVENT_DURATION_MINUTES);
+        endTime = offset.time;
+        endDate = offset.date;
+    } else if (!startTime && endTime) {
+        const offset = offsetDateTime(endDate, endTime, -ENV_VARS.DEFAULT_EVENT_DURATION_MINUTES);
+        startTime = offset.time;
+        startDate = offset.date;
+    } else if (!startTime && !endTime) {
+        const offset = offsetDateTime(startDate, ENV_VARS.DEFAULT_EVENT_START_TIME, ENV_VARS.DEFAULT_EVENT_DURATION_MINUTES);
+        startTime = ENV_VARS.DEFAULT_EVENT_START_TIME;
+        endTime = offset.time;
+        endDate = offset.date;
     }
 
     return {
         ...e,
+        is_all_day: false,
         start_date: startDate,
         end_date: endDate,
         start_time: startTime,

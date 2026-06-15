@@ -83,8 +83,10 @@ export const ENV_VARS = {
   CASE_CLASSIFICATION_PROMPT: `Analyze the legal document to classify it as one of the following: ${CASE_TYPES.join(', ')}. Return the final classification exactly as one of those strings.`,
   
   // Logic Defaults
+  // A main event with no time stated in the document defaults to a 2h block
+  // starting at this time (08:00 + 120min = 8:00–10:00 AM), mirroring reminders.
   DEFAULT_EVENT_DURATION_MINUTES: 120,
-  DEFAULT_EVENT_START_TIME: "09:00",
+  DEFAULT_EVENT_START_TIME: "08:00",
   TIMEZONE: "America/New_York", // Must be a valid IANA tz database code (e.g. "America/Los_Angeles", "Europe/London"). Full list: https://en.wikipedia.org/wiki/List_of_tz_database_time_zones
   
   // UI Simulation & Timeouts
