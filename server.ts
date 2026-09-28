@@ -1070,16 +1070,23 @@ If there are no more events to extract, return an empty events array with is_com
       involvedAttorneys: any[];
       involvedStaff: any[];
       timezone?: string;
+      defaultCalendarName?: string;
+      defaultCalendarID?: any;
     }
   ): Promise<void> {
     if (!storage) return;
     const jobId = job.id;
 
-    const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = params;
+    const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone, defaultCalendarName, defaultCalendarID } = params;
 
     const log = (msg: string, extra?: object) => {
       const line = `[export jobId=${jobId}] ${msg}` + (extra ? ` ${JSON.stringify(extra)}` : '');
       process.stdout.write(line + '\n');
+    };
+    // Records an error for the UI and logs it, with Clio's full response text in `extra`.
+    const addError = (message: string, extra?: object) => {
+      job.errors.push(message);
+      log('ERROR', { message, ...extra });
     };
     const persist = async () => {
       try { await storage!.jobs.put(job); }
@@ -1153,7 +1160,14 @@ If there are no more events to extract, return an empty events array with is_com
         return fail(`Matter "${matterDisplayNumber}" not found in Clio.`);
       }
       log('matter resolved', { id: matter.id });
-      log('matter client payload', { client: matter.client });
+      log('export selections', {
+        matterDisplayNumber,
+        matterId: matter.id,
+        eventCount: events.length,
+        host: { name: defaultCalendarName, calendarId: defaultCalendarID },
+        involvedAttorneys: involvedAttorneys.map((u: any) => ({ name: u.name, calendarId: u.calendar_id })),
+        involvedStaff: involvedStaff.map((u: any) => ({ name: u.name, calendarId: u.calendar_id })),
+      });
 
       const clientLastName = matter.client?.last_name || matter.client?.name || matterDisplayNumber;
       const clientId = matter.client?.id;
@@ -1192,6 +1206,11 @@ If there are no more events to extract, return an empty events array with is_com
             event["Firm Invitees"].forEach((i: any) => attendeeIds.add(i.calendar_id));
           }
           const attendees = Array.from(attendeeIds).map(id => ({ id: Number(id), type: "Calendar", _destroy: false }));
+          // The client is invited in the same create call rather than a follow-up PATCH,
+          // so it can't replace the firm attendees or fail unnoticed.
+          if (event["Invite Client"] && clientId) {
+            attendees.push({ id: Number(clientId), type: "Contact", _destroy: false });
+          }
 
           const eventTitle = `${clientLastName} - ${event.title}`;
           let startAt: string;
@@ -1213,8 +1232,17 @@ If there are no more events to extract, return an empty events array with is_com
 
           const calendarOwnerId = Number(event["Calendar Owner"]);
           const matterId = Number(matter.id);
+          log('event resolved', {
+            eventIdx,
+            host: event["Calendar Owner Name"],
+            calendarOwnerId: event["Calendar Owner"],
+            attendees: attendees.map(a => `${a.type}:${a.id}`),
+            inviteAllAttorneys: !!event.inviteAllAttorneys,
+            inviteAllStaff: !!event.inviteAllStaff,
+            inviteClient: !!event["Invite Client"],
+          });
           if (isNaN(calendarOwnerId) || isNaN(matterId)) {
-            job.errors.push(`Failed to create event "${event.title}": Invalid calendar owner or matter ID`);
+            addError(`Failed to create event "${event.title}": host calendar "${event["Calendar Owner Name"] || event["Calendar Owner"]}" was not found in Clio`, { eventIdx });
             continue;
           }
 
@@ -1244,7 +1272,7 @@ If there are no more events to extract, return an empty events array with is_com
           }
           if (!createEventResponse.ok) {
             const errText = await createEventResponse.text().catch(() => '');
-            job.errors.push(`Failed to create event "${event.title}": ${errText.slice(0, 200)}`);
+            addError(`Failed to create event "${event.title}" (Clio ${createEventResponse.status}): ${errText.slice(0, 200)}`, { eventIdx, clioStatus: createEventResponse.status, clioError: errText.slice(0, 1000) });
             continue;
           }
 
@@ -1252,19 +1280,7 @@ If there are no more events to extract, return an empty events array with is_com
           const clioEventId = createdEventData.data.id;
           job.summary.entriesCreated++;
           job.updatedAt = Date.now();
-
-          if (event["Invite Client"] && clientId) {
-            const patchPayload = {
-              data: {
-                attendees: [{ id: clientId, type: "Contact", _destroy: false }]
-              }
-            };
-            await clioFetch(accessToken, `https://app.clio.com/api/v4/calendar_entries/${clioEventId}.json`, {
-              method: "PATCH",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify(patchPayload)
-            });
-          }
+          log('event created', { eventIdx, clioEventId });
 
           // Reminders
           if (event.reminders && event.reminders.length > 0) {
@@ -1322,16 +1338,19 @@ If there are no more events to extract, return an empty events array with is_com
                     job.updatedAt = Date.now();
                   } else {
                     const errText = await createReminderCalResponse.text().catch(() => '');
-                    job.errors.push(`Failed to create calendar reminder for "${event.title}": ${errText.slice(0, 200)}`);
+                    addError(`Failed to create calendar reminder for "${event.title}" (Clio ${createReminderCalResponse.status}): ${errText.slice(0, 200)}`, { eventIdx, clioStatus: createReminderCalResponse.status, clioError: errText.slice(0, 1000) });
                   }
                 } else if (reminder.type === 'Email') {
                   for (const recipientCalendarId of recipients) {
                     const user = allUsers.find((u: any) => u.default_calendar_id === recipientCalendarId);
-                    if (!user) continue;
+                    if (!user) {
+                      log('email reminder skipped: no Clio user for calendar', { eventIdx, calendarId: recipientCalendarId });
+                      continue;
+                    }
 
                     const emailMethod = user.notification_methods?.find((m: any) => m.type === 'Email');
                     if (!emailMethod) {
-                      job.errors.push(`User ${user.name} does not have an Email notification method configured in Clio.`);
+                      addError(`User ${user.name} does not have an Email notification method configured in Clio.`, { eventIdx });
                       continue;
                     }
 
@@ -1359,23 +1378,30 @@ If there are no more events to extract, return an empty events array with is_com
                       job.updatedAt = Date.now();
                     } else {
                       const errText = await createReminderResponse.text().catch(() => '');
-                      job.errors.push(`Failed to send email reminder to ${user.name}: ${errText.slice(0, 200)}`);
+                      addError(`Failed to send email reminder to ${user.name} (Clio ${createReminderResponse.status}): ${errText.slice(0, 200)}`, { eventIdx, clioStatus: createReminderResponse.status, clioError: errText.slice(0, 1000) });
                     }
 
                     await sleep(1000);
                   }
                 }
               } catch (remErr: any) {
-                job.errors.push(`Error processing reminder for "${event.title}": ${remErr?.message || remErr}`);
+                addError(`Error processing reminder for "${event.title}": ${remErr?.message || remErr}`, { eventIdx });
               }
             }
           }
         } catch (evtErr: any) {
-          job.errors.push(`Error processing event "${event.title}": ${evtErr?.message || evtErr}`);
+          addError(`Error processing event "${event.title}": ${evtErr?.message || evtErr}`, { eventIdx });
         }
       }
 
-      log('export complete', { entriesCreated: job.summary.entriesCreated, remindersSent: job.summary.remindersSent, errorCount: job.errors.length });
+      log('export complete', {
+        matterDisplayNumber,
+        matterId: matter.id,
+        eventsRequested: events.length,
+        entriesCreated: job.summary.entriesCreated,
+        remindersSent: job.summary.remindersSent,
+        errorCount: job.errors.length,
+      });
       job.status = 'complete';
       job.updatedAt = Date.now();
       await persist();
@@ -1386,7 +1412,7 @@ If there are no more events to extract, return an empty events array with is_com
   }
 
   app.post("/api/clio/export-direct", async (req, res) => {
-    const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone } = req.body;
+    const { matterDisplayNumber, events, involvedAttorneys, involvedStaff, timezone, defaultCalendarName, defaultCalendarID } = req.body;
 
     if (!storage) {
       return res.status(503).json({ error: "No storage backend configured." });
@@ -1432,6 +1458,8 @@ If there are no more events to extract, return an empty events array with is_com
       involvedAttorneys: involvedAttorneys || [],
       involvedStaff: involvedStaff || [],
       timezone,
+      defaultCalendarName,
+      defaultCalendarID,
     }).catch(async (err: any) => {
       process.stderr.write(`[export jobId=${jobId}] runExportJob threw outside try: ${err?.message || err}\n`);
       try {

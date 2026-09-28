@@ -29,10 +29,11 @@ interface ExportModalProps {
   errorMessage?: string;
   selectedEvents: Event[];
   summary?: { entriesCreated: number; remindersSent: number };
+  exportErrors?: string[];
   progressValue?: number;
 }
 
-const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, onSubmit, status, errorMessage, selectedEvents, summary, progressValue }) => {
+const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, onSubmit, status, errorMessage, selectedEvents, summary, exportErrors = [], progressValue }) => {
   const [matterDisplayNumber, setMatterDisplayNumber] = useState('');
 
   // Reset matter number when modal opens fresh
@@ -129,15 +130,32 @@ const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, onSubmit, st
             </div>
           )}
 
+          {status === 'success' && exportErrors.length === 0 && (
+            <div className="bg-green-50 border border-green-100 p-4 rounded-xl flex flex-col items-center text-center gap-2 animate-fade-in">
+              <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mb-1">
+                <Check className="w-6 h-6 text-green-600" />
+              </div>
+              <h4 className="text-lg font-bold text-green-800">Export Successful</h4>
+              <p className="text-sm text-green-700">All events have been synced to Clio Manage.</p>
+            </div>
+          )}
+
+          {status === 'success' && exportErrors.length > 0 && (
+            <div className="bg-amber-50 border border-amber-200 p-4 rounded-xl space-y-2 animate-fade-in">
+              <div className="flex items-center gap-2">
+                <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0" />
+                <h4 className="text-sm font-bold text-amber-800">Export finished with {exportErrors.length} problem{exportErrors.length === 1 ? '' : 's'} reported by Clio</h4>
+              </div>
+              <ul className="max-h-48 overflow-y-auto custom-scrollbar list-disc pl-5 space-y-1">
+                {exportErrors.map((err, idx) => (
+                  <li key={idx} className="text-[11px] text-amber-900 break-words">{err}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+
           {status === 'success' && (
             <div className="space-y-4 py-2 animate-fade-in">
-              <div className="bg-green-50 border border-green-100 p-4 rounded-xl flex flex-col items-center text-center gap-2">
-                <div className="w-12 h-12 bg-green-100 rounded-full flex items-center justify-center mb-1">
-                  <Check className="w-6 h-6 text-green-600" />
-                </div>
-                <h4 className="text-lg font-bold text-green-800">Export Successful</h4>
-                <p className="text-sm text-green-700">All events have been synced to Clio Manage.</p>
-              </div>
               
               {summary && (
                 <div className="grid grid-cols-2 gap-3">
@@ -152,7 +170,9 @@ const ExportModal: React.FC<ExportModalProps> = ({ isOpen, onClose, onSubmit, st
                 </div>
               )}
               
-              <p className="text-[11px] text-gray-400 text-center italic">This window will close automatically in a few seconds.</p>
+              {exportErrors.length === 0 && (
+                <p className="text-[11px] text-gray-400 text-center italic">This window will close automatically in a few seconds.</p>
+              )}
             </div>
           )}
 
@@ -423,6 +443,7 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
   const [submissionStatus, setSubmissionStatus] = useState<'idle' | 'submitting' | 'success' | 'error'>('idle');
   const [submissionError, setSubmissionError] = useState<string | undefined>(undefined);
   const [exportSummary, setExportSummary] = useState<{ entriesCreated: number; remindersSent: number } | undefined>(undefined);
+  const [exportErrors, setExportErrors] = useState<string[]>([]);
   const [exportProgress, setExportProgress] = useState(0);
   const [sidebarWidth, setSidebarWidth] = useState(window.innerWidth / 2);
   const [isResizing, setIsResizing] = useState(false);
@@ -579,6 +600,14 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
     setIsExportModalOpen(true);
   };
 
+  const closeExportModal = () => {
+    setIsExportModalOpen(false);
+    setSubmissionStatus('idle');
+    setExportSummary(undefined);
+    setExportErrors([]);
+    setExportProgress(0);
+  };
+
   const handlePostEventsSubmit = async (matterDisplayNumber: string) => {
     setSubmissionStatus('submitting');
     setSubmissionError(undefined);
@@ -597,7 +626,8 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
       const resolveCalendarIdObj = (name: string) => {
         const user = getUserByName(name);
         return {
-          calendar_id: user?.default_calendar_id || name
+          calendar_id: user?.default_calendar_id || name,
+          name
         };
       };
 
@@ -618,12 +648,14 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
           manualUsers: (r.manualUsers || []).map(resolveCalendarIdObj)
         }));
 
-        const calId = getCalendarIdByName(targetCalendar || analysisState.defaultCalendarName || "");
+        const hostName = targetCalendar || analysisState.defaultCalendarName || "";
+        const calId = getCalendarIdByName(hostName);
         
         const firmInviteesList = (manualInvitees || []).map(name => {
           const user = getUserByName(name);
           return {
-            "calendar_id": user?.default_calendar_id || name
+            "calendar_id": user?.default_calendar_id || name,
+            name
           };
         });
 
@@ -631,6 +663,7 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
           ...rest,
           reminders: mappedReminders,
           "Calendar Owner": calId,
+          "Calendar Owner Name": hostName,
           "Invite Client": inviteClient || false,
           "inviteAllStaff": inviteAllStaff,
           "inviteAllAttorneys": inviteAllAttorneys,
@@ -640,6 +673,7 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
 
       const payload = {
         matterDisplayNumber,
+        defaultCalendarName: analysisState.defaultCalendarName,
         defaultCalendarID: getCalendarIdByName(analysisState.defaultCalendarName || ""),
         timezone: ENV_VARS.TIMEZONE,
         involvedAttorneys: involvedAttorneysList,
@@ -648,6 +682,7 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
       };
 
       setExportProgress(0);
+      setExportErrors([]);
 
       // Step 1: kick off the export job. Server returns 202 + { jobId } immediately.
       const startResponse = await fetch('/api/clio/export-direct', {
@@ -685,7 +720,7 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
         }
 
         const status = await statusResponse.json();
-        const { progress, status: jobStatus, errorMessage, summary } = status;
+        const { progress, status: jobStatus, errorMessage, summary, errors } = status;
 
         if (progress && progress.total > 0) {
           const pct = Math.round((progress.current / progress.total) * 95);
@@ -699,13 +734,12 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
         if (jobStatus === 'complete') {
           setExportProgress(100);
           setExportSummary(summary);
+          setExportErrors(errors || []);
           setSubmissionStatus('success');
-          setTimeout(() => {
-            setIsExportModalOpen(false);
-            setSubmissionStatus('idle');
-            setExportSummary(undefined);
-            setExportProgress(0);
-          }, ENV_VARS.POST_EVENTS_UI_RESET_DELAY);
+          // Keep the window open when Clio reported problems, so they can be read.
+          if (!errors || errors.length === 0) {
+            setTimeout(closeExportModal, ENV_VARS.POST_EVENTS_UI_RESET_DELAY);
+          }
           return;
         }
         // jobStatus === 'running' → continue polling
@@ -884,12 +918,13 @@ const ResultsView: React.FC<ResultsViewProps> = ({ events: initialEvents, file, 
         {isExportModalOpen && (
           <ExportModal
             isOpen={isExportModalOpen}
-            onClose={() => setIsExportModalOpen(false)}
+            onClose={() => submissionStatus === 'success' ? closeExportModal() : setIsExportModalOpen(false)}
             onSubmit={handlePostEventsSubmit}
             status={submissionStatus}
             errorMessage={submissionError}
             selectedEvents={events.filter(e => e.selected)}
             summary={exportSummary}
+            exportErrors={exportErrors}
             progressValue={exportProgress}
           />
         )}
