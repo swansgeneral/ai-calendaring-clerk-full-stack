@@ -123,6 +123,8 @@ export interface AnalyzedDoc {
   error?: string;
   events: Event[];
   caseType?: CaseType;
+  // Host, involved attorneys and staff chosen for this document, kept while switching docs
+  selections?: Pick<AnalysisState, 'defaultCalendarName' | 'involvedAttorneys' | 'involvedStaff'>;
   stats: {
     totalEvents: number;
     matchedEvents: number;

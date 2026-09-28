@@ -10,6 +10,9 @@ import { fetchAllIntegrationData, saveSOPData, fetchClioUsers, fetchClioCalendar
 import { AnalyzedDoc, Event, AnalysisState, SOPEvent, SOPReminder, Category } from './types';
 import { AlertCircle, Database, FileSearch, CheckCircle2, Link, ChevronLeft, ChevronRight } from 'lucide-react';
 
+// Host, involved attorneys and staff start empty for every new document.
+const EMPTY_SELECTIONS = { defaultCalendarName: undefined, involvedAttorneys: [], involvedStaff: [] };
+
 const App: React.FC = () => {
   const [view, setView] = useState<'analyzer' | 'database'>('analyzer');
   const [showSaveToast, setShowSaveToast] = useState(false);
@@ -301,7 +304,7 @@ const App: React.FC = () => {
     setAnalyzedDocsCount(0);
     setBatchProgress({ current: 0, total: 0, phase: 'idle' });
     setCurrentDocIndex(0);
-    setAnalysisState(prev => ({ ...prev, status: 'analyzing' }));
+    setAnalysisState(prev => ({ ...prev, status: 'analyzing', ...EMPTY_SELECTIONS }));
 
     // Initialize all docs as pending
     const initialDocs: AnalyzedDoc[] = files.map(file => ({
@@ -416,25 +419,32 @@ const App: React.FC = () => {
     analyzeDocsSequentially();
   };
 
+  // Each document keeps its own host, attorneys and staff. Save the current
+  // doc's picks before switching, then load the target doc's (empty if new).
+  const switchToDoc = (targetIndex: number) => {
+    const targetDoc = analyzedDocs[targetIndex];
+    const currentSelections = {
+      defaultCalendarName: analysisState.defaultCalendarName,
+      involvedAttorneys: analysisState.involvedAttorneys || [],
+      involvedStaff: analysisState.involvedStaff || []
+    };
+    setAnalyzedDocs(prev => prev.map((doc, idx) =>
+      idx === currentDocIndex ? { ...doc, selections: currentSelections } : doc
+    ));
+    setCurrentDocIndex(targetIndex);
+    setEvents(targetDoc.events || []);
+    setAnalysisState(prev => ({ ...prev, caseType: targetDoc.caseType, ...EMPTY_SELECTIONS, ...targetDoc.selections }));
+  };
+
   const handleNextDoc = () => {
     if (currentDocIndex < analyzedDocs.length - 1) {
-      const nextIndex = currentDocIndex + 1;
-      const nextDoc = analyzedDocs[nextIndex];
-      
-      setCurrentDocIndex(nextIndex);
-      setEvents(nextDoc.events || []);
-      setAnalysisState(prev => ({ ...prev, caseType: nextDoc.caseType }));
+      switchToDoc(currentDocIndex + 1);
     }
   };
 
   const handlePrevDoc = () => {
     if (currentDocIndex > 0) {
-      const prevIndex = currentDocIndex - 1;
-      const prevDoc = analyzedDocs[prevIndex];
-      
-      setCurrentDocIndex(prevIndex);
-      setEvents(prevDoc.events || []);
-      setAnalysisState(prev => ({ ...prev, caseType: prevDoc.caseType }));
+      switchToDoc(currentDocIndex - 1);
     }
   };
 
@@ -448,7 +458,8 @@ const App: React.FC = () => {
       ...prev, 
       status: 'idle', 
       caseType: undefined,
-      message: undefined
+      message: undefined,
+      ...EMPTY_SELECTIONS
     }));
   };
 
