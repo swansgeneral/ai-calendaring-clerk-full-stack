@@ -36,7 +36,7 @@ const EventEditorModal: React.FC<EventEditorModalProps> = ({
   const [editForm, setEditForm] = useState<Event>(event);
   
   // Tab: Calendar & Invitees States
-  const [useDefaultCalendar, setUseDefaultCalendar] = useState(!event.targetCalendar || event.targetCalendar === defaultCalendarName);
+  const [useDefaultCalendar, setUseDefaultCalendar] = useState(!event.targetCalendar);
   const [isInviteStaffActive, setIsInviteStaffActive] = useState(event.inviteAllStaff ?? true);
   const [isInviteAttorneysActive, setIsInviteAttorneysActive] = useState(event.inviteAllAttorneys ?? true);
   const [selectedOtherInvitees, setSelectedOtherInvitees] = useState<string[]>(event.manualInvitees || []);
@@ -70,7 +70,7 @@ const EventEditorModal: React.FC<EventEditorModalProps> = ({
   useEffect(() => {
     if (isOpen) {
       setEditForm(event);
-      setUseDefaultCalendar(!event.targetCalendar || event.targetCalendar === defaultCalendarName);
+      setUseDefaultCalendar(!event.targetCalendar);
       setIsClientInviteActive(event.inviteClient || false);
       setIsInviteStaffActive(event.inviteAllStaff ?? true);
       setIsInviteAttorneysActive(event.inviteAllAttorneys ?? true);
@@ -121,15 +121,23 @@ const EventEditorModal: React.FC<EventEditorModalProps> = ({
   // A timed event (not all-day) must have both a start and end time, otherwise
   // it breaks the Clio API. Block the save and send the user back to fix it.
   const isMissingRequiredTimes = !editForm.is_all_day && (!editForm.start_time || !editForm.end_time);
+  // With "use default" off, the user must pick a calendar explicitly.
+  const isMissingCalendar = !useDefaultCalendar && !editForm.targetCalendar;
+  const isSaveBlocked = isMissingRequiredTimes || isMissingCalendar;
 
   const handleGlobalSave = () => {
     if (isMissingRequiredTimes) {
       setActiveTab('details');
       return;
     }
+    if (isMissingCalendar) {
+      setActiveTab('calendar');
+      return;
+    }
     const finalEvent = {
       ...editForm,
-      targetCalendar: useDefaultCalendar ? defaultCalendarName : (editForm.targetCalendar || (availableCalendars[0]?.name || '')),
+      // "Use default" stores no calendar, so the current default is applied at export time.
+      targetCalendar: useDefaultCalendar ? undefined : editForm.targetCalendar,
       inviteAllStaff: isInviteStaffActive,
       inviteAllAttorneys: isInviteAttorneysActive,
       manualInvitees: selectedOtherInvitees,
@@ -263,7 +271,7 @@ const EventEditorModal: React.FC<EventEditorModalProps> = ({
     .filter(cal => cal.name.toLowerCase().includes(inviteeSearch.toLowerCase()))
     .filter(cal => {
       // 1. Exclude the calendar currently acting as the host for this event
-      const currentHostName = useDefaultCalendar ? defaultCalendarName : (editForm.targetCalendar || (availableCalendars[0]?.name || ''));
+      const currentHostName = useDefaultCalendar ? defaultCalendarName : (editForm.targetCalendar || '');
       const isHost = cal.name === currentHostName;
       
       // 2. Exclude members already selected as "Involved" (to prevent redundant invitations)
@@ -499,7 +507,7 @@ const EventEditorModal: React.FC<EventEditorModalProps> = ({
                         >
                             <CalendarIcon className="w-3 h-3 flex-shrink-0 text-slate-500" />
                             <div className="flex-1 truncate text-xs font-bold text-slate-800">
-                                {editForm.targetCalendar || (availableCalendars[0]?.name || '')}
+                                {editForm.targetCalendar || <span className="text-slate-400 font-normal italic text-[11px]">Select a calendar...</span>}
                             </div>
                             <ChevronDown className={`w-3 h-3 text-slate-400 transition-transform ${isCalendarDropdownOpen ? 'rotate-180' : ''}`} />
                         </div>
@@ -893,6 +901,11 @@ const EventEditorModal: React.FC<EventEditorModalProps> = ({
                 <ShieldAlert className="w-3.5 h-3.5" />
                 Add a start and end time, or mark this as an all-day event, to save.
               </span>
+            ) : isMissingCalendar ? (
+              <span className="text-red-600 font-bold flex items-center gap-1.5">
+                <ShieldAlert className="w-3.5 h-3.5" />
+                Pick a calendar, or turn on "Add Event to Default Calendar", to save.
+              </span>
             ) : (
               <span className="text-gray-400 italic">All changes auto-save when editing details or reminders</span>
             )}
@@ -906,10 +919,10 @@ const EventEditorModal: React.FC<EventEditorModalProps> = ({
             </button>
             <button
               onClick={handleGlobalSave}
-              disabled={isMissingRequiredTimes}
-              title={isMissingRequiredTimes ? "Add a start and end time, or mark this as an all-day event." : undefined}
+              disabled={isSaveBlocked}
+              title={isMissingRequiredTimes ? "Add a start and end time, or mark this as an all-day event." : isMissingCalendar ? "Pick a calendar for this event." : undefined}
               className={`px-6 py-2.5 font-bold text-xs uppercase tracking-widest rounded-lg transition-all flex items-center gap-2 ${
-                isMissingRequiredTimes
+                isSaveBlocked
                   ? 'bg-gray-300 text-gray-500 cursor-not-allowed shadow-none'
                   : 'bg-[#00076F] text-white hover:bg-[#00076F]/90 active:scale-95 shadow-lg hover:shadow-xl cursor-pointer'
               }`}
